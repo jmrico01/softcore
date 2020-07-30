@@ -4,7 +4,7 @@ import subprocess
 from compile import Platform, TargetType, Define, PlatformTargetOptions, BuildTarget, CopyDir, LibExternal
 from env_settings import WIN32_VCVARSALL, WIN32_VULKAN_PATH
 
-TARGET_APP = BuildTarget("vulkan",
+TARGET_APP = BuildTarget("softcore",
     source_file="src/main.cpp",
     type=TargetType.EXECUTABLE,
     defines=[],

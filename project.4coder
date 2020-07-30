@@ -1,6 +1,6 @@
 version(1);
 
-project_name = "vulkan";
+project_name = "softcore";
 
 patterns = {
 "*.cpp", "*.c", "*.h",
@@ -68,7 +68,7 @@ command_list = {
 	.name = "remedybg",
 	.out = "*remedybg*", .footer_panel = true, .save_dirty_files = false, .cursor_at_end = false,
 	.cmd = {
-		{"remedybg ../sessions-remedybg/vulkan.rdbg", .os = "win"}
+		{"remedybg ../sessions-remedybg/softcore.rdbg", .os = "win"}
 	},
 },
 {

@@ -9,8 +9,7 @@
 #include <km_common/vulkan/km_vulkan_text.h>
 
 #include "imgui.h"
-#include "level.h"
-#include "mesh.h"
+#include "raytracer.h"
 
 enum class SpriteId
 {
@@ -35,16 +34,19 @@ struct VulkanAppState
     VkCommandBuffer commandBuffer;
     VkFence fence;
 
+    VkImage image;
+    VkDeviceMemory imageMemory;
+
     VulkanSpritePipeline<(uint32)SpriteId::COUNT> spritePipeline;
     VulkanTextPipeline<(uint32)FontId::COUNT> textPipeline;
-
-    VulkanMeshPipeline meshPipeline;
-    VulkanLightmapMeshPipeline lightmapMeshPipeline;
 };
 
 struct AppState
 {
-    static const uint32 MAX_MOBS = 1024;
+    static const uint32 MAX_WIDTH = 3840;
+    static const uint32 MAX_HEIGHT = 2160;
+
+    LargeArray<uint8> arena;
 
     VulkanAppState vulkanAppState;
     VulkanFontFace fontFaces[FontId::COUNT];
@@ -54,25 +56,17 @@ struct AppState
     Vec3 cameraPos;
     Vec2 cameraAngles;
 
-    LevelData levelData;
+    FixedArray<uint32, MAX_WIDTH * MAX_HEIGHT> pixels;
+    RaycastGeometry raycastGeometry;
 
     // Debug
     bool debugView;
-
-    bool noclip;
-    Vec3 noclipPos;
-
-    bool blockEditor;
-    PanelSliderState sliderBlockSize;
-    PanelDropdownState loadLevelDropdownState;
 };
 
 struct FrameState
 {
     VulkanSpriteRenderState<(uint32)SpriteId::COUNT> spriteRenderState;
     VulkanTextRenderState<(uint32)FontId::COUNT> textRenderState;
-
-    VulkanMeshRenderState meshRenderState;
 };
 
 struct TransientState
