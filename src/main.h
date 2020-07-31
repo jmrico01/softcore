@@ -43,10 +43,8 @@ struct VulkanAppState
 
 struct AppState
 {
-    static const uint32 MAX_WIDTH = 3840;
-    static const uint32 MAX_HEIGHT = 2160;
-
     LargeArray<uint8> arena;
+    LinearAllocator arenaAllocator;
 
     VulkanAppState vulkanAppState;
     VulkanFontFace fontFaces[FontId::COUNT];
@@ -56,11 +54,13 @@ struct AppState
     Vec3 cameraPos;
     Vec2 cameraAngles;
 
-    FixedArray<uint32, MAX_WIDTH * MAX_HEIGHT> pixels;
+    CanvasState canvas;
     RaycastGeometry raycastGeometry;
 
     // Debug
     bool debugView;
+    PanelSliderState inputScreenFillState;
+    PanelInputIntState inputDecayFramesState;
 };
 
 struct FrameState

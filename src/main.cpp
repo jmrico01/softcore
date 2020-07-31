@@ -60,8 +60,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         (int)vulkanState.swapchain.extent.width,
         (int)vulkanState.swapchain.extent.height
     };
-    DEBUG_ASSERT(screenSize.x < AppState::MAX_WIDTH);
-    DEBUG_ASSERT(screenSize.y < AppState::MAX_HEIGHT);
+    DEBUG_ASSERT(screenSize.x < CanvasState::MAX_WIDTH);
+    DEBUG_ASSERT(screenSize.y < CanvasState::MAX_HEIGHT);
 
     const float32 CAMERA_HEIGHT = 1.7f;
 
@@ -71,9 +71,15 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             .size = memory->permanent.size - sizeof(AppState),
             .data = memory->permanent.data + sizeof(AppState),
         };
+        appState->arenaAllocator = LinearAllocator(appState->arena);
 
         appState->cameraPos = Vec3 { 3.74f, -5.21f, 2.49f };
         appState->cameraAngles = Vec2 { -2.26f, -0.77f };
+
+        appState->canvas.screenFill = 1.0f / 60.0f;
+        appState->canvas.decayFrames = 255;
+        MemSet(appState->canvas.colorHdr.data, 0, CanvasState::MAX_PIXELS * sizeof(Vec3));
+        MemSet(appState->canvas.decay.data, 0, CanvasState::MAX_PIXELS * sizeof(uint8));
 
         {
             LinearAllocator tempAllocator(transientState->scratch);
@@ -83,14 +89,16 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
 
             LinearAllocator arenaAllocator(appState->arena);
-            RaycastGeometry geometry = CreateRaycastGeometry(obj, &arenaAllocator);
+
+            const uint32 boxMaxTriangles = 32;
+            RaycastGeometry geometry = CreateRaycastGeometry(obj, boxMaxTriangles, &arenaAllocator, &tempAllocator);
             if (geometry.meshes.data == nullptr) {
                 DEBUG_PANIC("Failed to construct raycast geometry from obj\n");
             }
 
             uint32 totalTriangles = 0;
             for (uint32 i = 0; i < geometry.meshes.size; i++) {
-                totalTriangles += geometry.meshes[i].triangles.size;
+                totalTriangles += geometry.meshes[i].numTriangles;
             }
             LOG_INFO("Loaded raycast geometry: %lu meshes, %lu total triangles\n",
                      geometry.meshes.size, totalTriangles);
@@ -100,6 +108,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         // Debug views 
         appState->debugView = false;
         LockCursor(false);
+
+        appState->inputScreenFillState.value = appState->canvas.screenFill;
+        appState->inputDecayFramesState.Initialize(appState->canvas.decayFrames);
 
         memory->initialized = true;
     }
@@ -205,10 +216,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         const int panelPosMargin = 50;
 
         // General debug info
-        const Vec2Int panelDebugInfoPos = { screenSize.x - panelPosMargin, panelPosMargin };
+        const Vec2Int panelDebugInfoPos = { panelPosMargin, panelPosMargin };
 
         Panel panelDebugInfo(&allocator);
-        panelDebugInfo.Begin(input, &fontNormal, PanelFlag::GROW_DOWNWARDS, panelDebugInfoPos, 1.0f);
+        panelDebugInfo.Begin(input, &fontNormal, PanelFlag::GROW_DOWNWARDS, panelDebugInfoPos, 0.0f);
 
         const int fps = (int)(1.0f / deltaTime);
         const float32 frameMs = deltaTime * 1000.0f;
@@ -230,6 +241,21 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             LockCursor(cursorLocked);
         }
 
+        panelDebugInfo.Text(string::empty);
+
+        panelDebugInfo.Text(ToString("Screen fill"));
+        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.25f)) {
+            appState->canvas.screenFill = appState->inputScreenFillState.value;
+        }
+
+        panelDebugInfo.Text(ToString("Decay frames (0 - 255)"));
+        if (panelDebugInfo.InputInt(&appState->inputDecayFramesState)) {
+            const int value = appState->inputDecayFramesState.value;
+            if (value > 0 && value <= 255) {
+                appState->canvas.decayFrames = (uint8)appState->inputDecayFramesState.value;
+            }
+        }
+
         panelDebugInfo.Draw(panelBorderSize, Vec4::one, backgroundColor, screenSize,
                             &transientState->frameState.spriteRenderState, &transientState->frameState.textRenderState);
     }
@@ -240,12 +266,27 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         const uint32 numPixels = screenSize.x * screenSize.y;
         RaytraceRender(appState->cameraPos, cameraRot, appState->raycastGeometry,
-                       screenSize.x, screenSize.y, appState->pixels.data, &allocator, queue);
+                       screenSize.x, screenSize.y, &appState->canvas, &allocator, queue);
 
         const uint32 numBytes = numPixels * 4;
         void* imageMemory;
         vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
-        MemCopy(imageMemory, appState->pixels.data, numBytes);
+        float32 maxMagSq = 1.0f;
+        for (uint32 i = 0; i < numPixels; i++) {
+            float32 magSq = MagSq(appState->canvas.colorHdr[i]);
+            maxMagSq = MaxFloat32(magSq, maxMagSq);
+        }
+
+        uint32* pixels = (uint32*)imageMemory;
+        for (uint32 i = 0; i < numPixels; i++) {
+            const Vec3 colorNormalized = appState->canvas.colorHdr[i] / sqrtf(maxMagSq);
+            // TODO gamma correction?
+            const uint8 r = (uint8)(colorNormalized.r * 255.0f);
+            const uint8 g = (uint8)(colorNormalized.g * 255.0f);
+            const uint8 b = (uint8)(colorNormalized.b * 255.0f);
+            pixels[i] = ((uint32)r << 16) + ((uint32)g << 8) + b;
+        }
+        // MemCopy(imageMemory, appState->pixels.data, numBytes);
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
     }
 
