@@ -11,15 +11,16 @@
 #include <km_common/km_string.h>
 #include <km_common/app/km_app.h>
 
-// NOTE disabled default km_app thread creation
 #define ENABLE_THREADS 1
+
+#define BEGIN_INTERIOR 0
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
 const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
-const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(128);
+const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
 const uint64 TRANSIENT_MEMORY_SIZE = MEGABYTES(512);
 
 internal AppState* GetAppState(AppMemory* memory)
@@ -48,6 +49,37 @@ internal TransientState* GetTransientState(AppMemory* memory)
     return transientState;
 }
 
+internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator* allocator)
+{
+    const_string scenePath = AllocPrintf(allocator, "data/models/%.*s.obj", scene.size, scene.data);
+
+    LoadObjResult obj;
+    if (!LoadObj(scenePath, Vec3::zero, 1.0f, &obj, allocator)) {
+        LOG_ERROR("Failed to load obj file \"%.*s\" for scene %.*s\n", scenePath.size, scenePath.data,
+                  scene.size, scene.data);
+        return false;
+    }
+
+    appState->arenaAllocator.Clear();
+
+    const uint32 boxMaxTriangles = 32;
+    RaycastGeometry geometry = CreateRaycastGeometry(obj, boxMaxTriangles, &appState->arenaAllocator, allocator);
+    if (geometry.meshes.data == nullptr) {
+        LOG_ERROR("Failed to construct raycast geometry from obj for scene %.*s\n", scene.size, scene.data);
+        return false;
+    }
+
+    uint32 totalTriangles = 0;
+    for (uint32 i = 0; i < geometry.meshes.size; i++) {
+        totalTriangles += geometry.meshes[i].numTriangles;
+    }
+    LOG_INFO("Loaded raycast geometry for scene %.*s - %lu meshes, %lu total triangles\n",
+             scene.size, scene.data, geometry.meshes.size, totalTriangles);
+    appState->raycastGeometry = geometry;
+
+    return true;
+}
+
 APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 {
     UNREFERENCED_PARAMETER(queue);
@@ -73,8 +105,15 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         };
         appState->arenaAllocator = LinearAllocator(appState->arena);
 
+#if BEGIN_INTERIOR
+        // Scene - interiors
+        appState->cameraPos = Vec3 { -1.15f, -2.21f, 0.20f };
+        appState->cameraAngles = Vec2 { -1.25f, 0.03f };
+#else
+        // Scene - light cones
         appState->cameraPos = Vec3 { 3.74f, -5.21f, 2.49f };
         appState->cameraAngles = Vec2 { -2.26f, -0.77f };
+#endif
 
         appState->canvas.screenFill = 1.0f / 60.0f;
         appState->canvas.decayFrames = 255;
@@ -82,27 +121,13 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         MemSet(appState->canvas.decay.data, 0, CanvasState::MAX_PIXELS * sizeof(uint8));
 
         {
-            LinearAllocator tempAllocator(transientState->scratch);
-            LoadObjResult obj;
-            if (!LoadObj(ToString("data/models/light-cones-min.obj"), &obj, &tempAllocator)) {
-                DEBUG_PANIC("Failed to load reference scene obj\n");
-            }
+            LinearAllocator allocator(transientState->scratch);
 
-            LinearAllocator arenaAllocator(appState->arena);
-
-            const uint32 boxMaxTriangles = 32;
-            RaycastGeometry geometry = CreateRaycastGeometry(obj, boxMaxTriangles, &arenaAllocator, &tempAllocator);
-            if (geometry.meshes.data == nullptr) {
-                DEBUG_PANIC("Failed to construct raycast geometry from obj\n");
-            }
-
-            uint32 totalTriangles = 0;
-            for (uint32 i = 0; i < geometry.meshes.size; i++) {
-                totalTriangles += geometry.meshes[i].numTriangles;
-            }
-            LOG_INFO("Loaded raycast geometry: %lu meshes, %lu total triangles\n",
-                     geometry.meshes.size, totalTriangles);
-            appState->raycastGeometry = geometry;
+#if BEGIN_INTERIOR
+            LoadScene(ToString("interior-1"), appState, &allocator);
+#else
+            LoadScene(ToString("light-cones"), appState, &allocator);
+#endif
         }
 
         // Debug views 
@@ -177,7 +202,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     }
 
     if (velocity != Vec3::zero) {
-        float32 speed = 5.0f;
+        float32 speed = 0.7f;
         if (KeyDown(input, KM_KEY_SHIFT)) {
             speed *= 2.0f;
         }
@@ -244,7 +269,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         panelDebugInfo.Text(string::empty);
 
         panelDebugInfo.Text(ToString("Screen fill"));
-        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.25f)) {
+        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.1f)) {
             appState->canvas.screenFill = appState->inputScreenFillState.value;
         }
 
@@ -253,6 +278,30 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const int value = appState->inputDecayFramesState.value;
             if (value > 0 && value <= 255) {
                 appState->canvas.decayFrames = (uint8)appState->inputDecayFramesState.value;
+            }
+        }
+
+        panelDebugInfo.Text(string::empty);
+
+        const Array<string> modelFiles = ListDir(ToString("data/models"), &allocator);
+        if (modelFiles.data != nullptr) {
+            DynamicArray<string, LinearAllocator> scenes(&allocator);
+            for (uint32 i = 0; i < modelFiles.size; i++) {
+                const uint32 find = SubstringSearch(modelFiles[i], ToString(".obj"));
+                if (find != modelFiles[i].size) {
+                    scenes.Append(modelFiles[i].SliceTo(find));
+                }
+            }
+
+            panelDebugInfo.Text(ToString("Load scene"));
+            if (panelDebugInfo.Dropdown(&appState->inputSceneDropdownState, scenes.ToArray())) {
+                const_string scene = scenes[appState->inputSceneDropdownState.selected];
+                if (LoadScene(scene, appState, &allocator)) {
+                    LOG_INFO("Loaded scene %.*s\n", scene.size, scene.data);
+                }
+                else {
+                    LOG_ERROR("Failed to load scene %.*s\n", scene.size, scene.data);
+                }
             }
         }
 
@@ -271,15 +320,18 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         const uint32 numBytes = numPixels * 4;
         void* imageMemory;
         vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
-        float32 maxMagSq = 1.0f;
+
+        float32 maxColor = 1.0f;
         for (uint32 i = 0; i < numPixels; i++) {
-            float32 magSq = MagSq(appState->canvas.colorHdr[i]);
-            maxMagSq = MaxFloat32(magSq, maxMagSq);
+            const Vec3 colorHdr = appState->canvas.colorHdr[i];
+            maxColor = MaxFloat32(maxColor, colorHdr.r);
+            maxColor = MaxFloat32(maxColor, colorHdr.g);
+            maxColor = MaxFloat32(maxColor, colorHdr.b);
         }
 
         uint32* pixels = (uint32*)imageMemory;
         for (uint32 i = 0; i < numPixels; i++) {
-            const Vec3 colorNormalized = appState->canvas.colorHdr[i] / sqrtf(maxMagSq);
+            const Vec3 colorNormalized = appState->canvas.colorHdr[i] / maxColor;
             // TODO gamma correction?
             const uint8 r = (uint8)(colorNormalized.r * 255.0f);
             const uint8 g = (uint8)(colorNormalized.g * 255.0f);

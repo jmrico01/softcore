@@ -48,7 +48,7 @@ void StopAndPrintDebugTimer(DebugTimer* timer)
     LOG_INFO("Timer: %.03fms | %llu MC\n", win32Time, timer->cycles / 1000000);
 }
 
-void FillRaycastMeshBoxRecursive(RaycastMeshBox* box, Box minBox, uint32 boxMaxTriangles, Array<RaycastTriangle> triangles, 
+bool FillRaycastMeshBoxRecursive(RaycastMeshBox* box, Box minBox, uint32 boxMaxTriangles, Array<RaycastTriangle> triangles, 
                                  LinearAllocator* allocator, LinearAllocator* tempAllocator)
 {
     DEBUG_ASSERT(box != nullptr);
@@ -86,6 +86,9 @@ void FillRaycastMeshBoxRecursive(RaycastMeshBox* box, Box minBox, uint32 boxMaxT
         box->child1 = nullptr;
         box->child2 = nullptr;
         box->triangles = allocator->NewArray<RaycastTriangle>(insideTriangles.size);
+        if (box->triangles.data == nullptr) {
+            return false;
+        }
         box->triangles.CopyFrom(insideTriangles.ToArray());
     }
     else {
@@ -100,16 +103,28 @@ void FillRaycastMeshBoxRecursive(RaycastMeshBox* box, Box minBox, uint32 boxMaxT
         minBox2.min.e[longestDimension] += halfLongestDimension;
 
         box->child1 = allocator->New<RaycastMeshBox>();
-        FillRaycastMeshBoxRecursive(box->child1, minBox1, boxMaxTriangles, insideTriangles.ToArray(),
-                                    allocator, tempAllocator);
+        if (box->child1 == nullptr) {
+            return false;
+        }
+        if (!FillRaycastMeshBoxRecursive(box->child1, minBox1, boxMaxTriangles, insideTriangles.ToArray(),
+                                         allocator, tempAllocator)) {
+            return false;
+        }
 
         box->child2 = allocator->New<RaycastMeshBox>();
-        FillRaycastMeshBoxRecursive(box->child2, minBox2, boxMaxTriangles, insideTriangles.ToArray(),
-                                    allocator, tempAllocator);
+        if (box->child2 == nullptr) {
+            return false;
+        }
+        if (!FillRaycastMeshBoxRecursive(box->child2, minBox2, boxMaxTriangles, insideTriangles.ToArray(),
+                                         allocator, tempAllocator)) {
+            return false;
+        }
     }
+
+    return true;
 }
 
-void FillRaycastMeshBox(RaycastMeshBox* box, uint32 boxMaxTriangles, Array<RaycastTriangle> triangles,
+bool FillRaycastMeshBox(RaycastMeshBox* box, uint32 boxMaxTriangles, Array<RaycastTriangle> triangles,
                         LinearAllocator* allocator, LinearAllocator* tempAllocator)
 {
     DEBUG_ASSERT(box != nullptr);
@@ -131,6 +146,9 @@ void FillRaycastMeshBox(RaycastMeshBox* box, uint32 boxMaxTriangles, Array<Rayca
         box->child1 = nullptr;
         box->child2 = nullptr;
         box->triangles = allocator->NewArray<RaycastTriangle>(triangles.size);
+        if (box->triangles.data == nullptr) {
+            return false;
+        }
         box->triangles.CopyFrom(triangles);
     }
     else {
@@ -145,11 +163,23 @@ void FillRaycastMeshBox(RaycastMeshBox* box, uint32 boxMaxTriangles, Array<Rayca
         minBox2.min.e[longestDimension] += halfLongestDimension;
 
         box->child1 = allocator->New<RaycastMeshBox>();
-        FillRaycastMeshBoxRecursive(box->child1, minBox1, boxMaxTriangles, triangles, allocator, tempAllocator);
+        if (box->child1 == nullptr) {
+            return false;
+        }
+        if (!FillRaycastMeshBoxRecursive(box->child1, minBox1, boxMaxTriangles, triangles, allocator, tempAllocator)) {
+            return false;
+        }
 
         box->child2 = allocator->New<RaycastMeshBox>();
-        FillRaycastMeshBoxRecursive(box->child2, minBox2, boxMaxTriangles, triangles, allocator, tempAllocator);
+        if (box->child2 == nullptr) {
+            return false;
+        }
+        if (!FillRaycastMeshBoxRecursive(box->child2, minBox2, boxMaxTriangles, triangles, allocator, tempAllocator)) {
+            return false;
+        }
     }
+
+    return true;
 }
 
 RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTriangles,
@@ -157,34 +187,50 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
 {
     RaycastGeometry geometry = {};
 
-    geometry.materials = allocator->NewArray<RaycastMaterial>(4);
+    geometry.materials = allocator->NewArray<RaycastMaterial>(obj.materials.size);
     if (geometry.materials.data == nullptr) {
         return geometry;
     }
 
-    // Light cubes
-    geometry.materials[0].smoothness = 0.0f;
-    geometry.materials[0].albedo = Vec3 { 1.0f, 0.0f, 0.082f };
-    geometry.materials[0].emission = 4.0f;
-    geometry.materials[0].emissionColor = Vec3 { 1.0f, 0.0f, 0.0f };
+    for (uint32 i = 0; i < obj.materials.size; i++) {
+        const_string name = obj.materials[i].name;
+        RaycastMaterial& material = geometry.materials[i];
 
-    // Light cone
-    geometry.materials[1].smoothness = 0.0f;
-    geometry.materials[1].albedo = Vec3 { 0.0f, 1.0f, 0.42f };
-    geometry.materials[1].emission = 4.0f;
-    geometry.materials[1].emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
-
-    // Light disk (overhead)
-    geometry.materials[2].smoothness = 0.0f;
-    geometry.materials[2].albedo = Vec3 { 0.9294f, 0.651f, 1.0f };
-    geometry.materials[2].emission = 1.0f;
-    geometry.materials[2].emissionColor = Vec3 { 0.9294f, 0.651f, 1.0f };
-
-    // Surfaces (everything else)
-    geometry.materials[3].smoothness = 0.5f;
-    geometry.materials[3].albedo = Vec3 { 1.0f, 1.0f, 1.0f };
-    geometry.materials[3].emission = 0.0f;
-    geometry.materials[3].emissionColor = Vec3::zero;
+        if (StringEquals(name, ToString("Surfaces")) || StringEquals(name, ToString("None"))) {
+            material.smoothness = 0.8f;
+            material.albedo = Vec3 { 1.0f, 1.0f, 1.0f };
+            material.emission = 0.0f;
+            material.emissionColor = Vec3::zero;
+        }
+        else if (StringEquals(name, ToString("LightHardGreen"))) {
+            material.smoothness = 0.0f;
+            material.albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+            material.emission = 1.5f;
+            material.emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+        }
+        else if (StringEquals(name, ToString("LightSoftGreen"))) {
+            material.smoothness = 0.0f;
+            material.albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+            material.emission = 1.0f;
+            material.emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+        }
+        else if (StringEquals(name, ToString("LightPink"))) {
+            material.smoothness = 0.0f;
+            material.albedo = Vec3 { 0.9294f, 0.651f, 1.0f };
+            material.emission = 1.0f;
+            material.emissionColor = Vec3 { 0.9294f, 0.651f, 1.0f };
+        }
+        else if (StringEquals(name, ToString("LightRed"))) {
+            material.smoothness = 0.0f;
+            material.albedo = Vec3 { 1.0f, 0.0f, 0.082f };
+            material.emission = 1.5f;
+            material.emissionColor = Vec3 { 1.0f, 0.0f, 0.082f };
+        }
+        else {
+            LOG_ERROR("Unrecognized material: %.*s\n", name.size, name.data);
+            return geometry;
+        }
+    }
 
     geometry.meshes = allocator->NewArray<RaycastMesh>(obj.models.size);
     if (geometry.meshes.data == nullptr) {
@@ -195,20 +241,6 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
 
     for (uint32 i = 0; i < obj.models.size; i++) {
         RaycastMesh& mesh = geometry.meshes[i];
-
-        // For light cones min scene
-        if (i == 2 || i == 3 || i == 4) { // cubes
-            mesh.materialIndex = 0;
-        }
-        else if (i == obj.models.size - 3) { // light cone
-            mesh.materialIndex = 1;
-        }
-        else if (i == obj.models.size - 1) { // light overhead
-            mesh.materialIndex = 2;
-        }
-        else { // everything else
-            mesh.materialIndex = 3;
-        }
 
         const uint32 numTriangles = obj.models[i].triangles.size + obj.models[i].quads.size * 2;
         mesh.numTriangles = numTriangles;
@@ -228,6 +260,7 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
                 triangles[j].pos[k] = t.v[k].pos;
             }
             triangles[j].normal = normal;
+            triangles[j].materialIndex = t.materialIndex;
         }
         for (uint32 j = 0; j < obj.models[i].quads.size; j++) {
             const uint32 ind = obj.models[i].triangles.size + j * 2;
@@ -238,21 +271,28 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
                 triangles[ind].pos[k] = q.v[k].pos;
             }
             triangles[ind].normal = normal;
+            triangles[ind].materialIndex = q.materialIndex;
 
             for (int k = 0; k < 3; k++) {
                 const uint32 quadInd = (k + 2) % 4;
                 triangles[ind + 1].pos[k] = q.v[quadInd].pos;
             }
             triangles[ind + 1].normal = normal;
+            triangles[ind + 1].materialIndex = q.materialIndex;
         }
 
-        FillRaycastMeshBox(&mesh.box, boxMaxTriangles, triangles, allocator, tempAllocator);
+        if (!FillRaycastMeshBox(&mesh.box, boxMaxTriangles, triangles, allocator, tempAllocator)) {
+            LOG_ERROR("Failed to fill raycast mesh box for mesh %lu\n", i);
+            geometry.meshes.data = nullptr;
+            return geometry;
+        }
     }
 
     return geometry;
 }
 
-bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, Array<RaycastTriangle> triangles, Vec3* hitNormal, float32* hitDist)
+bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTriangle> triangles,
+                  uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
     bool hit = false;
 
@@ -267,7 +307,8 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, Array<RaycastTriangle> triangles,
         const bool tIntersect = RayTriangleIntersection(rayOrigin, rayDir,
                                                         triangle.pos[0], triangle.pos[1], triangle.pos[2],
                                                         &t);
-        if (tIntersect && t > 0.0f && t < *hitDist) {
+        if (tIntersect && t > minDist && t < *hitDist) {
+            *hitMaterialIndex = triangle.materialIndex;
             *hitNormal = triangle.normal;
             *hitDist = t;
             hit = true;
@@ -277,33 +318,37 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, Array<RaycastTriangle> triangles,
     return hit;
 }
 
-bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, const RaycastMeshBox& box,
-                     Vec3* hitNormal, float32* hitDist)
+bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 minDist, float32 maxDist, 
+                     const RaycastMeshBox& box, uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
-    float32 t;
-    bool intersect = RayAxisAlignedBoxIntersection(rayOrigin, inverseRayDir, box.aabb, &t);
-    if (!intersect) {
+    // TODO get tMin and tMax out of AABB intersect, can discard rays by distance
+    float32 tMin, tMax;
+    bool intersect = RayAxisAlignedBoxIntersection(rayOrigin, inverseRayDir, box.aabb, &tMin, &tMax);
+    if (!intersect || (tMin < 0.0f && tMax < 0.0f) || tMin > maxDist) {
         return false;
     }
 
     if (box.child1 == nullptr) {
-        return HitTriangles(rayOrigin, rayDir, box.triangles, hitNormal, hitDist);
+        return HitTriangles(rayOrigin, rayDir, minDist, box.triangles, hitMaterialIndex, hitNormal, hitDist);
     }
 
     bool hit = false;
 
     // TODO remove this recursion? need thread-safe allocators though
-    if (TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, *box.child1, hitNormal, hitDist)) {
+    if (TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, maxDist, *box.child1,
+                        hitMaterialIndex, hitNormal, hitDist)) {
         hit = true;
     }
-    if (TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, *box.child2, hitNormal, hitDist)) {
+
+    if (TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, maxDist, *box.child2,
+                        hitMaterialIndex, hitNormal, hitDist)) {
         hit = true;
     }
 
     return hit;
 }
 
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, const RaycastGeometry& geometry)
+Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist, const RaycastGeometry& geometry)
 {
     const uint32 SAMPLES = 8;
     const uint32 BOUNCES = 4;
@@ -313,36 +358,23 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, const RaycastGeometry& geometry)
     Vec3 color = Vec3::zero;
     for (uint32 s = 0; s < SAMPLES; s++) {
         for (uint32 b = 0; b < BOUNCES; b++) {
-            Vec3 inverseRayDir = Reciprocal(rayDir);
+            const Vec3 inverseRayDir = Reciprocal(rayDir);
 
-            uint32 hitMaterialInd = geometry.materials.size;
+            uint32 hitMaterialIndex = geometry.materials.size;
             Vec3 hitNormal = Vec3::zero;
-            float32 hitDist = 1e8;
+            float32 hitDist = maxDist;
             for (uint32 i = 0; i < geometry.meshes.size; i++) {
                 const RaycastMesh& mesh = geometry.meshes[i];
 
-#if 1
-                if (TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, mesh.box, &hitNormal, &hitDist)) {
-                    hitMaterialInd = mesh.materialIndex;
-                }
-#else
-                float32 tAabb;
-                bool intersect = RayAxisAlignedBoxIntersection(rayOrigin, inverseRayDir, mesh.box.aabb, &tAabb);
-                if (!intersect) {
-                    continue;
-                }
-
-                if (HitTriangles(rayOrigin, rayDir, mesh.triangles, &hitNormal, &hitDist)) {
-                    hitMaterialInd = mesh.materialIndex;
-                }
-#endif
+                TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, maxDist, mesh.box,
+                                &hitMaterialIndex, &hitNormal, &hitDist);
             }
 
-            if (hitMaterialInd == geometry.materials.size) {
+            if (hitMaterialIndex == geometry.materials.size) {
                 break;
             }
 
-            const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialInd];
+            const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialIndex];
             if (hitMaterial.emission > 0.0f) {
                 color += sampleWeight * hitMaterial.emission * hitMaterial.emissionColor;
                 break;
@@ -379,7 +411,7 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 
     RaycastThreadWork* work = (RaycastThreadWork*)data;
 
-    work->outputColor = RaycastColor(work->cameraPos, work->rayDir, *work->geometry);
+    work->outputColor = RaycastColor(work->cameraPos, work->rayDir, 0.0f, 20.0f, *work->geometry);
 }
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geometry,

@@ -4,10 +4,19 @@
 #include <km_common/km_memory.h>
 #include <km_common/app/km_app.h>
 
+struct RaycastMaterial
+{
+    float32 smoothness;
+    Vec3 albedo;
+    float32 emission;
+    Vec3 emissionColor;
+};
+
 struct RaycastTriangle
 {
     Vec3 pos[3];
     Vec3 normal;
+    uint32 materialIndex;
 };
 
 struct RaycastMeshBox
@@ -20,17 +29,8 @@ struct RaycastMeshBox
 
 struct RaycastMesh
 {
-    uint32 materialIndex;
     RaycastMeshBox box;
     uint32 numTriangles;
-};
-
-struct RaycastMaterial
-{
-    float32 smoothness;
-    Vec3 albedo;
-    float32 emission;
-    Vec3 emissionColor;
 };
 
 struct RaycastGeometry
