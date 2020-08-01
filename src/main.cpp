@@ -13,7 +13,7 @@
 
 #define ENABLE_THREADS 1
 
-#define BEGIN_INTERIOR 0
+#define BEGIN_INTERIOR 1
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
