@@ -1,5 +1,10 @@
 #pragma once
 
+#define TRACY_ENABLE
+#ifdef TRACY_ENABLE
+#include <TracyClient.cpp>
+#endif
+
 #include <km_common/app/km_log.h>
 
 #include <km_common/km_array.h>

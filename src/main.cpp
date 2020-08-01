@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include <stb_image.h>
+#include <Tracy.hpp>
 
 #include <km_common/km_array.h>
 #include <km_common/km_defines.h>
@@ -21,7 +22,7 @@ const int WINDOW_START_WIDTH  = 1024;
 const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
-const uint64 TRANSIENT_MEMORY_SIZE = MEGABYTES(512);
+const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(1);
 
 internal AppState* GetAppState(AppMemory* memory)
 {
@@ -73,7 +74,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     for (uint32 i = 0; i < geometry.meshes.size; i++) {
         totalTriangles += geometry.meshes[i].numTriangles;
     }
-    LOG_INFO("Loaded raycast geometry for scene %.*s - %lu meshes, %lu total triangles\n",
+    LOG_INFO("Loaded raycast geometry for scene \"%.*s\" - %lu meshes, %lu total triangles\n",
              scene.size, scene.data, geometry.meshes.size, totalTriangles);
     appState->raycastGeometry = geometry;
 
@@ -82,8 +83,8 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
 
 APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 {
-    UNREFERENCED_PARAMETER(queue);
     UNREFERENCED_PARAMETER(audio);
+    FrameMark;
 
     AppState* appState = GetAppState(memory);
     TransientState* transientState = GetTransientState(memory);
@@ -99,6 +100,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     // Initialize memory if necessary
     if (!memory->initialized) {
+        ZoneScopedN("InitMemory");
+
         appState->arena = {
             .size = memory->permanent.size - sizeof(AppState),
             .data = memory->permanent.data + sizeof(AppState),
@@ -250,6 +253,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         const float32 frameMs = deltaTime * 1000.0f;
         const_string frameTiming = AllocPrintf(&allocator, "%d fps | %.03f ms", fps, frameMs);
         panelDebugInfo.Text(frameTiming);
+        const_string resolution = AllocPrintf(&allocator, "%d x %d", screenSize.x, screenSize.y);
+        panelDebugInfo.Text(resolution);
+
         panelDebugInfo.Text(string::empty);
 
         const_string cameraPosString = AllocPrintf(&allocator, "%.02f, %.02f, %.02f POS",
@@ -311,6 +317,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     // Ray traced rendering
     {
+        ZoneScopedN("RayTraceRender");
+
         LinearAllocator allocator(transientState->scratch);
 
         const uint32 numPixels = screenSize.x * screenSize.y;
@@ -347,17 +355,20 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     // ================================================================================================
 
     VkCommandBuffer buffer = appState->vulkanAppState.commandBuffer;
-
-    // TODO revisit this. should the platform coordinate something like this in some other way?
-    // swapchain image acquisition timings seem to be kind of sloppy tbh, so this might be the best way.
     VkFence fence = appState->vulkanAppState.fence;
-    if (vkWaitForFences(vulkanState.window.device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-        LOG_ERROR("vkWaitForFences didn't return success for fence %lu\n", swapchainImageIndex);
-    }
-    if (vkResetFences(vulkanState.window.device, 1, &fence) != VK_SUCCESS) {
-        LOG_ERROR("vkResetFences didn't return success for fence %lu\n", swapchainImageIndex);
-    }
 
+    {
+        ZoneScopedN("WaitForFence");
+
+        // TODO revisit this. should the platform coordinate something like this in some other way?
+        // swapchain image acquisition timings seem to be kind of sloppy tbh, so this might be the best way.
+        if (vkWaitForFences(vulkanState.window.device, 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            LOG_ERROR("vkWaitForFences didn't return success for fence %lu\n", swapchainImageIndex);
+        }
+        if (vkResetFences(vulkanState.window.device, 1, &fence) != VK_SUCCESS) {
+            LOG_ERROR("vkResetFences didn't return success for fence %lu\n", swapchainImageIndex);
+        }
+    }
 
     if (vkResetCommandBuffer(buffer, 0) != VK_SUCCESS) {
         LOG_ERROR("vkResetCommandBuffer failed\n");

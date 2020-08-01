@@ -19,17 +19,17 @@ struct RaycastTriangle
     uint32 materialIndex;
 };
 
-struct RaycastMeshBox
+struct RaycastMeshBvh
 {
     Box aabb;
-    RaycastMeshBox* child1;
-    RaycastMeshBox* child2;
+    RaycastMeshBvh* child1;
+    RaycastMeshBvh* child2;
     Array<RaycastTriangle> triangles;
 };
 
 struct RaycastMesh
 {
-    RaycastMeshBox box;
+    RaycastMeshBvh bvh;
     uint32 numTriangles;
 };
 

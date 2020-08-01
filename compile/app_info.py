@@ -23,6 +23,9 @@ TARGET_APP = BuildTarget("softcore",
                 "-LIBPATH:\"" + WIN32_VULKAN_PATH + "\\Lib\"", # TODO HACK
                 "user32.lib",
                 "vulkan-1.lib",
+				
+				# for Tracy profiler
+				"Advapi32.lib",
                 # "-subsystem:windows",      # Windows application (no console)
                 # "-nodefaultlib",           # No sneaky CRT or kernel32.lib
                 # "-STACK:0x100000,0x100000" # Allocate and commit 1MB for main thread's stack
@@ -78,7 +81,8 @@ LIBS_EXTERNAL = [
     ),
     LibExternal("stbimage", path="stb_image-2.23"),
     LibExternal("stbimagewrite", path="stb_image_write-1.14"),
-    LibExternal("stbsprintf", path="stb_sprintf-1.06")
+    LibExternal("stbsprintf", path="stb_sprintf-1.06"),
+    LibExternal("tracy", path="tracy-0.7.0")
 ]
 
 PATHS = {
