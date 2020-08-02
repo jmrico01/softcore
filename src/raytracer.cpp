@@ -420,7 +420,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
         .maxDist = 20.0f
     };
 
-    // The idea is that, over 1 second, we'll get a whole frame-pixels' worth of rays
     uint32 NUM_RAYS_PER_FRAME = (uint32)(canvas->screenFill * (float32)width * (float32)height);
     NUM_RAYS_PER_FRAME = RoundUpToPowerOfTwo(NUM_RAYS_PER_FRAME, RaycastThreadWork::PIXELS_PER_WORK_UNIT);
 
@@ -446,9 +445,33 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
     const float32 neighborIntensity = 0.5f;
     for (uint32 i = 0; i < workEntries.size; i++) {
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
-            const uint32 pixelInd = workEntries[i].pixels[j].y * width + workEntries[i].pixels[j].x;
-            canvas->colorHdr[pixelInd] = workEntries[i].outputColors[j];
-            canvas->decay[pixelInd] = 0;
+            const Vec2Int pixel = workEntries[i].pixels[j];
+            const Vec3 color = workEntries[i].outputColors[j];
+
+            const uint32 index = pixel.y * width + pixel.x;
+            canvas->colorHdr[index] += color;
+            canvas->decay[index] = 0;
+
+            if (pixel.x > 0) {
+                const uint32 indexLeft = index - 1;
+                canvas->colorHdr[indexLeft] += color * neighborIntensity;
+                canvas->decay[indexLeft] = 0;
+            }
+            if ((uint32)pixel.x < width - 1) {
+                const uint32 indexRight = index + 1;
+                canvas->colorHdr[indexRight] += color * neighborIntensity;
+                canvas->decay[indexRight] = 0;
+            }
+            if (pixel.y > 0) {
+                const uint32 indexTop = index - width;
+                canvas->colorHdr[indexTop] += color * neighborIntensity;
+                canvas->decay[indexTop] = 0;
+            }
+            if ((uint32)pixel.y < height - 1) {
+                const uint32 indexBottom = index + width;
+                canvas->colorHdr[indexBottom] += color * neighborIntensity;
+                canvas->decay[indexBottom] = 0;
+            }
         }
     }
 }
