@@ -64,6 +64,8 @@ struct AppState
     bool debugView;
     PanelSliderState inputScreenFillState;
     PanelInputIntState inputDecayFramesState;
+    PanelInputIntState inputSamplesState;
+    PanelInputIntState inputBouncesState;
     PanelDropdownState inputSceneDropdownState;
 };
 

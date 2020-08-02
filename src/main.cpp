@@ -120,6 +120,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->canvas.screenFill = 1.0f / 60.0f;
         appState->canvas.decayFrames = 255;
+        appState->canvas.samples = 8;
+        appState->canvas.bounces = 4;
+
         MemSet(appState->canvas.colorHdr.data, 0, CanvasState::MAX_PIXELS * sizeof(Vec3));
         MemSet(appState->canvas.decay.data, 0, CanvasState::MAX_PIXELS * sizeof(uint8));
 
@@ -139,6 +142,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->inputScreenFillState.value = appState->canvas.screenFill;
         appState->inputDecayFramesState.Initialize(appState->canvas.decayFrames);
+        appState->inputSamplesState.Initialize(appState->canvas.samples);
+        appState->inputBouncesState.Initialize(appState->canvas.bounces);
 
         memory->initialized = true;
     }
@@ -284,6 +289,22 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const int value = appState->inputDecayFramesState.value;
             if (value > 0 && value <= 255) {
                 appState->canvas.decayFrames = (uint8)appState->inputDecayFramesState.value;
+            }
+        }
+
+        panelDebugInfo.Text(ToString("Samples (at least 1)"));
+        if (panelDebugInfo.InputInt(&appState->inputSamplesState)) {
+            const int value = appState->inputSamplesState.value;
+            if (value > 0) {
+                appState->canvas.samples = appState->inputSamplesState.value;
+            }
+        }
+
+        panelDebugInfo.Text(ToString("Bounces (at least 1)"));
+        if (panelDebugInfo.InputInt(&appState->inputBouncesState)) {
+            const int value = appState->inputBouncesState.value;
+            if (value > 0) {
+                appState->canvas.bounces = appState->inputBouncesState.value;
             }
         }
 

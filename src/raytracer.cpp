@@ -294,20 +294,18 @@ bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 mi
     return hit;
 }
 
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist, const RaycastGeometry& geometry)
+Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 samples, uint32 bounces, float32 minDist, float32 maxDist,
+                  const RaycastGeometry& geometry)
 {
     ZoneScoped;
-    const uint32 SAMPLES = 8;
-    const uint32 BOUNCES = 4;
 
     // TODO have some guarantee that this stack will be big enough
     const RaycastMeshBvh* bvhStack[4096];
 
-    const float32 sampleWeight = 1.0f / (float32)SAMPLES;
-
+    const float32 sampleWeight = 1.0f / (float32)samples;
     Vec3 color = Vec3::zero;
-    for (uint32 s = 0; s < SAMPLES; s++) {
-        for (uint32 b = 0; b < BOUNCES; b++) {
+    for (uint32 s = 0; s < samples; s++) {
+        for (uint32 b = 0; b < bounces; b++) {
             const Vec3 inverseRayDir = Reciprocal(rayDir);
 
             uint32 hitMaterialIndex = geometry.materials.size;
@@ -349,10 +347,13 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
 
 struct RaycastThreadWorkCommon
 {
+    const RaycastGeometry* geometry;
     Vec3 filmTopLeft;
     Vec3 filmUnitOffsetX;
     Vec3 filmUnitOffsetY;
     Vec3 cameraPos;
+    uint32 samples;
+    uint32 bounces;
     float32 minDist;
     float32 maxDist;
 };
@@ -362,7 +363,6 @@ struct RaycastThreadWork
     static const uint32 PIXELS_PER_WORK_UNIT = 64;
 
     const RaycastThreadWorkCommon* common;
-    const RaycastGeometry* geometry;
     Vec2Int pixels[PIXELS_PER_WORK_UNIT];
     Vec3 outputColors[PIXELS_PER_WORK_UNIT];
 };
@@ -378,7 +378,10 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
         const Vec3 filmOffsetY = work->common->filmUnitOffsetY * (float32)work->pixels[i].y;
         const Vec3 filmPos = work->common->filmTopLeft + filmOffsetX + filmOffsetY;
         const Vec3 rayDir = Normalize(filmPos - work->common->cameraPos);
-        work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir, 0.0f, 20.0f, *work->geometry);
+        work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir,
+                                             work->common->samples, work->common->bounces,
+                                             work->common->minDist, work->common->maxDist,
+                                             *(work->common->geometry));
     }
 }
 
@@ -412,12 +415,15 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
     const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)height;
 
     const RaycastThreadWorkCommon workCommon = {
+        .geometry = &geometry,
         .filmTopLeft = filmTopLeft,
         .filmUnitOffsetX = filmUnitOffsetX,
         .filmUnitOffsetY = filmUnitOffsetY,
         .cameraPos = cameraPos,
+        .samples = canvas->samples,
+        .bounces = canvas->bounces,
         .minDist = 0.0f,
-        .maxDist = 20.0f
+        .maxDist = 20.0f,
     };
 
     uint32 NUM_RAYS_PER_FRAME = (uint32)(canvas->screenFill * (float32)width * (float32)height);
@@ -427,7 +433,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
     Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
     for (uint32 i = 0; i < workEntries.size; i++) {
         workEntries[i].common = &workCommon;
-        workEntries[i].geometry = &geometry;
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
             workEntries[i].pixels[j].x = RandInt(width);
             workEntries[i].pixels[j].y = RandInt(height);

@@ -50,6 +50,9 @@ struct CanvasState
 
     float32 screenFill;
     uint8 decayFrames;
+    uint32 bounces;
+    uint32 samples;
+
     StaticArray<Vec3, MAX_PIXELS> colorHdr;
     StaticArray<uint8, MAX_PIXELS> decay;
 };
