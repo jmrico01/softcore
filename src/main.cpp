@@ -150,6 +150,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     // Reset frame state
     {
+        // ResetMeshRenderState(&transientState->frameState.meshRenderState);
         ResetSpriteRenderState(&transientState->frameState.spriteRenderState);
         ResetTextRenderState(&transientState->frameState.textRenderState);
     }
@@ -297,6 +298,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const int value = appState->inputSamplesState.value;
             if (value > 0) {
                 appState->canvas.samples = appState->inputSamplesState.value;
+                LOG_INFO("Set samples: %d\n", appState->canvas.samples);
             }
         }
 
@@ -305,6 +307,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const int value = appState->inputBouncesState.value;
             if (value > 0) {
                 appState->canvas.bounces = appState->inputBouncesState.value;
+                LOG_INFO("Set bounces: %d\n", appState->canvas.bounces);
             }
         }
 
@@ -336,15 +339,71 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                             &transientState->frameState.spriteRenderState, &transientState->frameState.textRenderState);
     }
 
+    // ================================================================================================
+    // Rendering ======================================================================================
+    // ================================================================================================
+
+    {
+        ZoneScopedN("PreRasterize");
+
+        const VulkanMeshPipeline& meshPipeline = appState->vulkanAppState.meshPipeline;
+
+        const MeshUniformBufferObject ubo = { .view = view, .proj = proj };
+        void* data;
+        vkMapMemory(vulkanState.window.device, meshPipeline.uniformBuffer.memory, 0,
+                    sizeof(MeshUniformBufferObject), 0, &data);
+        MemCopy(data, &ubo, sizeof(ubo));
+        vkUnmapMemory(vulkanState.window.device, meshPipeline.uniformBuffer.memory);
+
+        VkSubmitInfo submitInfo = {};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.waitSemaphoreCount = 0;
+        submitInfo.pWaitSemaphores = nullptr;
+        submitInfo.pWaitDstStageMask = nullptr;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &meshPipeline.commandBuffer;
+        submitInfo.signalSemaphoreCount = 0;
+        submitInfo.pSignalSemaphores = nullptr;
+
+        if (vkQueueSubmit(vulkanState.window.graphicsQueue, 1, &submitInfo, meshPipeline.fence) != VK_SUCCESS) {
+            LOG_ERROR("Failed to submit mesh command buffer\n");
+        }
+
+        {
+            ZoneScopedN("Wait");
+
+            if (vkWaitForFences(vulkanState.window.device, 1, &meshPipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                LOG_ERROR("vkWaitForFences didn't return success for fence %lu\n", swapchainImageIndex);
+            }
+            if (vkResetFences(vulkanState.window.device, 1, &meshPipeline.fence) != VK_SUCCESS) {
+                LOG_ERROR("vkResetFences didn't return success for fence %lu\n", swapchainImageIndex);
+            }
+        }
+    }
+
     // Ray traced rendering
     {
         ZoneScopedN("RayTraceRender");
 
         LinearAllocator allocator(transientState->scratch);
 
+        uint8* materialIndices = allocator.New<uint8>(screenSize.x * screenSize.y);
+        {
+            ZoneScopedN("ReadMaterialIndices");
+
+            const uint32 materialIndicesSize = screenSize.x * screenSize.y * sizeof(uint8);
+            const VkDeviceMemory& materialIndexMemory = appState->vulkanAppState.meshPipeline.materialIndexImageDstMemory;
+
+            void* data;
+            vkMapMemory(vulkanState.window.device, materialIndexMemory, 0, materialIndicesSize, 0, &data);
+            MemCopy(materialIndices, data, materialIndicesSize);
+            vkUnmapMemory(vulkanState.window.device, materialIndexMemory);
+        }
+
         const uint32 numPixels = screenSize.x * screenSize.y;
-        RaytraceRender(appState->cameraPos, cameraRot, appState->raycastGeometry,
+        RaytraceRender(appState->cameraPos, cameraRot, appState->raycastGeometry, materialIndices,
                        screenSize.x, screenSize.y, &appState->canvas, &allocator, queue);
+
 
         const uint32 numBytes = numPixels * 4;
         void* imageMemory;
@@ -371,15 +430,12 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
     }
 
-    // ================================================================================================
-    // Vulkan rendering ===============================================================================
-    // ================================================================================================
-
+    // Vulkan rendering
     VkCommandBuffer buffer = appState->vulkanAppState.commandBuffer;
     VkFence fence = appState->vulkanAppState.fence;
 
     {
-        ZoneScopedN("WaitForFence");
+        ZoneScopedN("WaitForFinalRenderFence");
 
         // TODO revisit this. should the platform coordinate something like this in some other way?
         // swapchain image acquisition timings seem to be kind of sloppy tbh, so this might be the best way.
@@ -404,6 +460,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         LOG_ERROR("vkBeginCommandBuffer failed\n");
     }
 
+    TransitionImageLayout(buffer, appState->vulkanAppState.image,
+                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     TransitionImageLayout(buffer, appState->vulkanAppState.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     TransitionImageLayout(buffer, vulkanState.swapchain.images[swapchainImageIndex],
@@ -448,6 +506,17 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     renderPassInfo.pClearValues = clearValues;
 
     vkCmdBeginRenderPass(buffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+#if 0
+    // Meshes
+    {
+        PushMesh(MeshId::INTERIOR1, Mat4::one, Vec3::one, Vec3::zero, 0.0f, &transientState->frameState.meshRenderState);
+
+        LinearAllocator allocator(transientState->scratch);
+        UploadAndSubmitMeshDrawCommands(vulkanState.window.device, buffer, appState->vulkanAppState.meshPipeline,
+                                        transientState->frameState.meshRenderState, view, proj, &allocator);
+    }
+#endif
 
     // Sprites
     {
@@ -510,6 +579,11 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
         return false;
     }
 
+    if (!LoadMeshPipelineSwapchain(window, swapchain, app->commandPool, &allocator, &app->meshPipeline)) {
+        LOG_ERROR("Failed to load swapchain-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+
     if (!LoadSpritePipelineSwapchain(window, swapchain, &allocator, &app->spritePipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan sprite pipeline\n");
         return false;
@@ -532,6 +606,7 @@ APP_UNLOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppUnloadVulkanSwapchainState)
 
     UnloadTextPipelineSwapchain(device, &app->textPipeline);
     UnloadSpritePipelineSwapchain(device, &app->spritePipeline);
+    UnloadMeshPipelineSwapchain(device, &app->meshPipeline);
 
     vkDestroyImage(device, app->image, nullptr);
     vkFreeMemory(device, app->imageMemory, nullptr);
@@ -587,6 +662,12 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             LOG_ERROR("vkCreateFence failed\n");
             return false;
         }
+    }
+
+    const bool meshPipeline = LoadMeshPipelineWindow(window, app->commandPool, &allocator, &app->meshPipeline);
+    if (!meshPipeline) {
+        LOG_ERROR("Failed to load window-dependent Vulkan mesh pipeline\n");
+        return false;
     }
 
     const bool spritePipeline = LoadSpritePipelineWindow(window, app->commandPool, &allocator, &app->spritePipeline);
@@ -693,12 +774,14 @@ APP_UNLOAD_VULKAN_WINDOW_STATE_FUNCTION(AppUnloadVulkanWindowState)
 
     UnloadTextPipelineWindow(device, &app->textPipeline);
     UnloadSpritePipelineWindow(device, &app->spritePipeline);
+    UnloadMeshPipelineWindow(device, &app->meshPipeline);
 
     vkDestroyFence(device, app->fence, nullptr);
     vkDestroyCommandPool(device, app->commandPool, nullptr);
 }
 
 #include "imgui.cpp"
+#include "mesh.cpp"
 #include "raytracer.cpp"
 
 #include <km_common/km_array.cpp>

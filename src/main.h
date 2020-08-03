@@ -1,6 +1,6 @@
 #pragma once
 
-// #define TRACY_ENABLE
+#define TRACY_ENABLE
 #include <TracyClient.cpp>
 
 #include <km_common/app/km_log.h>
@@ -12,6 +12,7 @@
 #include <km_common/vulkan/km_vulkan_text.h>
 
 #include "imgui.h"
+#include "mesh.h"
 #include "raytracer.h"
 
 enum class SpriteId
@@ -40,6 +41,7 @@ struct VulkanAppState
     VkImage image;
     VkDeviceMemory imageMemory;
 
+    VulkanMeshPipeline meshPipeline;
     VulkanSpritePipeline<(uint32)SpriteId::COUNT> spritePipeline;
     VulkanTextPipeline<(uint32)FontId::COUNT> textPipeline;
 };
@@ -71,6 +73,7 @@ struct AppState
 
 struct FrameState
 {
+    // VulkanMeshRenderState meshRenderState;
     VulkanSpriteRenderState<(uint32)SpriteId::COUNT> spriteRenderState;
     VulkanTextRenderState<(uint32)FontId::COUNT> textRenderState;
 };

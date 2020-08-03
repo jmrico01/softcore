@@ -8,6 +8,43 @@
 #include <Tracy.hpp>
 #endif
 
+struct RandomSeries
+{
+    uint32 state;
+};
+
+// Reference https://en.wikipedia.org/wiki/Xorshift
+uint32 XOrShift32(RandomSeries* series)
+{
+    uint32 x = series->state;
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+
+    series->state = x;
+	return x;
+}
+
+uint32 RandomUInt32(RandomSeries* series)
+{
+    return XOrShift32(series);
+}
+
+int RandomInt32(RandomSeries* series, uint32 max)
+{
+    return (int)(RandomUInt32(series) % max);
+}
+
+float32 RandomUnilateral(RandomSeries* series)
+{
+    return (float32)RandomUInt32(series) / (float32)UINT32_MAX_VALUE;
+}
+
+float32 RandomBilateral(RandomSeries* series)
+{
+    return 2.0f * RandomUnilateral(series) - 1.0f;
+}
+
 struct DebugTimer
 {
     static bool initialized;
@@ -143,7 +180,7 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
         RaycastMaterial& material = geometry.materials[i];
 
         if (StringEquals(name, ToString("Surfaces")) || StringEquals(name, ToString("None"))) {
-            material.smoothness = 0.8f;
+            material.smoothness = 1.0f;
             material.albedo = Vec3 { 1.0f, 1.0f, 1.0f };
             material.emission = 0.0f;
             material.emissionColor = Vec3::zero;
@@ -295,7 +332,7 @@ bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 mi
 }
 
 Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 samples, uint32 bounces, float32 minDist, float32 maxDist,
-                  const RaycastGeometry& geometry)
+                  const RaycastGeometry& geometry, RandomSeries* series)
 {
     ZoneScoped;
 
@@ -333,9 +370,9 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 samples, uint32 bounces, f
                 const Quat xToNormal = QuatRotBetweenVectors(Vec3::unitX, hitNormal);
                 const Vec3 pureBounce = rayDir - 2.0f * Dot(rayDir, hitNormal) * hitNormal;
                 const Vec3 randomBounce = xToNormal * NormalizeOrZero(Vec3 {
-                                                                          RandFloat32( 0.0f, 1.0f),
-                                                                          RandFloat32(-1.0f, 1.0f),
-                                                                          RandFloat32(-1.0f, 1.0f)
+                                                                          RandomUnilateral(series),
+                                                                          RandomBilateral(series),
+                                                                          RandomBilateral(series),
                                                                       });
                 rayDir = NormalizeOrZero(Lerp(randomBounce, pureBounce, hitMaterial.smoothness));
             }
@@ -358,18 +395,23 @@ struct RaycastThreadWorkCommon
     float32 maxDist;
 };
 
+struct RaycastThreadWorkState
+{
+    Array<RandomSeries> threadRandomSeries;
+};
+
 struct RaycastThreadWork
 {
     static const uint32 PIXELS_PER_WORK_UNIT = 64;
 
     const RaycastThreadWorkCommon* common;
+    RaycastThreadWorkState* state;
     Vec2Int pixels[PIXELS_PER_WORK_UNIT];
     Vec3 outputColors[PIXELS_PER_WORK_UNIT];
 };
 
 APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 {
-    UNREFERENCED_PARAMETER(threadIndex);
     UNREFERENCED_PARAMETER(queue);
 
     RaycastThreadWork* work = (RaycastThreadWork*)data;
@@ -381,14 +423,17 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
         work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir,
                                              work->common->samples, work->common->bounces,
                                              work->common->minDist, work->common->maxDist,
-                                             *(work->common->geometry));
+                                             *(work->common->geometry),
+                                             &work->state->threadRandomSeries[threadIndex]);
     }
 }
 
-void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geometry,
+void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geometry, const uint8* materialIndices,
                     uint32 width, uint32 height, CanvasState* canvas, LinearAllocator* allocator, AppWorkQueue* queue)
 {
     ZoneScoped;
+    UNREFERENCED_PARAMETER(materialIndices);
+
     for (uint32 i = 0; i < width * height; i++) {
         uint8* decay = &canvas->decay.data[i];
         if (*decay != 0xff) {
@@ -397,6 +442,9 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
                 canvas->colorHdr[i] = Vec3::zero;
                 *decay = 0xff;
             }
+        }
+        if (materialIndices[i] == 0) {
+            canvas->colorHdr[i] = Vec3::one;
         }
     }
 
@@ -426,6 +474,20 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
         .maxDist = 20.0f,
     };
 
+    RandomSeries series;
+    const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
+    series.state = seed;
+    series.state = (uint32)rand();
+
+    const uint32 numThreads = GetCpuCount();
+    RaycastThreadWorkState workState = {};
+    workState.threadRandomSeries = allocator->NewArray<RandomSeries>(numThreads);
+    for (uint32 i = 0; i < workState.threadRandomSeries.size; i++) {
+        // TODO these don't guarantee same results, because threads will pick work entries in undefined order
+        // Need a more specific, dedicated thread pool system for this task
+        workState.threadRandomSeries[i].state = RandomUInt32(&series);
+    }
+
     uint32 NUM_RAYS_PER_FRAME = (uint32)(canvas->screenFill * (float32)width * (float32)height);
     NUM_RAYS_PER_FRAME = RoundUpToPowerOfTwo(NUM_RAYS_PER_FRAME, RaycastThreadWork::PIXELS_PER_WORK_UNIT);
 
@@ -433,9 +495,10 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
     Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
     for (uint32 i = 0; i < workEntries.size; i++) {
         workEntries[i].common = &workCommon;
+        workEntries[i].state = &workState;
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
-            workEntries[i].pixels[j].x = RandInt(width);
-            workEntries[i].pixels[j].y = RandInt(height);
+            workEntries[i].pixels[j].x = RandomInt32(&series, width);
+            workEntries[i].pixels[j].y = RandomInt32(&series, height);
         }
 
         if (!TryAddWork(queue, &RaycastThreadProc, &workEntries[i])) {
@@ -447,14 +510,16 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
 
     CompleteAllWork(queue, 0);
 
-    const float32 neighborIntensity = 0.5f;
+    const float32 neighborIntensity = 0.0f;
+    const float32 prevWeight = 0.0f;
     for (uint32 i = 0; i < workEntries.size; i++) {
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
             const Vec2Int pixel = workEntries[i].pixels[j];
             const Vec3 color = workEntries[i].outputColors[j];
 
             const uint32 index = pixel.y * width + pixel.x;
-            canvas->colorHdr[index] += color;
+            const Vec3 prevColor = canvas->colorHdr[index];
+            canvas->colorHdr[index] = Lerp(color, prevColor + color, prevWeight);
             canvas->decay[index] = 0;
 
             if (pixel.x > 0) {
