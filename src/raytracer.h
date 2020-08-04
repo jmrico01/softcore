@@ -55,9 +55,14 @@ struct CanvasState
     uint32 bounces;
     uint32 samples;
 
+    float32 test1;
+    float32 test2;
+    float32 test3;
+
     StaticArray<Vec3, MAX_PIXELS> colorHdr;
     StaticArray<uint8, MAX_PIXELS> decay;
 };
 
-void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geometry, const uint8* materialIndices,
-                    uint32 width, uint32 height, CanvasState* canvas, LinearAllocator* allocator, AppWorkQueue* queue);
+void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
+                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas,
+                    LinearAllocator* allocator, AppWorkQueue* queue);

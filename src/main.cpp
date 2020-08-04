@@ -119,9 +119,14 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 #endif
 
         appState->canvas.screenFill = 1.0f / 60.0f;
-        appState->canvas.decayFrames = 255;
+        appState->canvas.decayFrames = 2;
         appState->canvas.samples = 8;
         appState->canvas.bounces = 4;
+
+        // It's a mystery...
+        appState->canvas.test1 = 0.0f;
+        appState->canvas.test2 = -0.136f;
+        appState->canvas.test3 = 0.136f;
 
         MemSet(appState->canvas.colorHdr.data, 0, CanvasState::MAX_PIXELS * sizeof(Vec3));
         MemSet(appState->canvas.decay.data, 0, CanvasState::MAX_PIXELS * sizeof(uint8));
@@ -203,10 +208,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     if (KeyDown(input, KM_KEY_D)) {
         velocity += cameraRightXY;
     }
-    if (KeyDown(input, KM_KEY_SPACE)) {
+    if (KeyDown(input, KM_KEY_E)) {
         velocity += cameraUp;
     }
-    if (KeyDown(input, KM_KEY_CTRL)) {
+    if (KeyDown(input, KM_KEY_Q)) {
         velocity -= cameraUp;
     }
 
@@ -222,9 +227,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     const Quat cameraRot = cameraRotPitch * cameraRotYaw;
     const Mat4 cameraRotMat4 = UnitQuatToMat4(cameraRot);
 
-    const Quat inverseCameraRot = Inverse(cameraRot);
-    const Vec3 cameraForward = inverseCameraRot * Vec3::unitX;
-
     // Transforms world-view camera (+X forward, +Z up) to Vulkan camera (+Z forward, -Y up)
     const Quat baseCameraRot = QuatFromAngleUnitAxis(-PI_F / 2.0f, Vec3::unitY)
         * QuatFromAngleUnitAxis(PI_F / 2.0f, Vec3::unitX);
@@ -232,10 +234,11 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     const Mat4 view = baseCameraRotMat4 * cameraRotMat4 * Translate(-appState->cameraPos);
 
+    const float32 fov = PI_F / 4.0f;
     const float32 aspect = (float32)screenSize.x / (float32)screenSize.y;
     const float32 nearZ = 0.1f;
     const float32 farZ = 100.0f;
-    const Mat4 proj = Perspective(PI_F / 4.0f, aspect, nearZ, farZ);
+    const Mat4 proj = Perspective(fov, aspect, nearZ, farZ);
 
     // Debug views
     if (appState->debugView) {
@@ -335,6 +338,26 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
 
+        panelDebugInfo.Text(string::empty);
+        static PanelSliderState inputTest1 = {
+            .value = appState->canvas.test1
+        };
+        static PanelSliderState inputTest2 = {
+            .value = appState->canvas.test2
+        };
+        static PanelSliderState inputTest3 = {
+            .value = appState->canvas.test3
+        };
+        if (panelDebugInfo.SliderFloat(&inputTest1, 0.75f, 1.0f)) {
+            appState->canvas.test1 = inputTest1.value;
+        }
+        if (panelDebugInfo.SliderFloat(&inputTest2, -0.2f, 0.0f)) {
+            appState->canvas.test2 = inputTest2.value;
+        }
+        if (panelDebugInfo.SliderFloat(&inputTest3, 0.0f, 0.2f)) {
+            appState->canvas.test3 = inputTest3.value;
+        }
+
         panelDebugInfo.Draw(panelBorderSize, Vec4::one, backgroundColor, screenSize,
                             &transientState->frameState.spriteRenderState, &transientState->frameState.textRenderState);
     }
@@ -401,7 +424,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
 
         const uint32 numPixels = screenSize.x * screenSize.y;
-        RaytraceRender(appState->cameraPos, cameraRot, appState->raycastGeometry, materialIndices,
+        RaytraceRender(appState->cameraPos, cameraRot, fov, appState->raycastGeometry, materialIndices,
                        screenSize.x, screenSize.y, &appState->canvas, &allocator, queue);
 
 
@@ -686,8 +709,6 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
     {
         const char* spriteFilePaths[] = {
             "data/sprites/pixel.png",
-            "data/sprites/jon.png",
-            "data/sprites/rock.png"
         };
         static_assert(C_ARRAY_LENGTH(spriteFilePaths) == (uint32)SpriteId::COUNT);
 

@@ -4,9 +4,7 @@
 #include <time.h>
 
 #include <stb_image_write.h>
-#ifdef TRACY_ENABLE
 #include <Tracy.hpp>
-#endif
 
 struct RandomSeries
 {
@@ -180,7 +178,7 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
         RaycastMaterial& material = geometry.materials[i];
 
         if (StringEquals(name, ToString("Surfaces")) || StringEquals(name, ToString("None"))) {
-            material.smoothness = 1.0f;
+            material.smoothness = 0.8f;
             material.albedo = Vec3 { 1.0f, 1.0f, 1.0f };
             material.emission = 0.0f;
             material.emissionColor = Vec3::zero;
@@ -428,8 +426,9 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     }
 }
 
-void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geometry, const uint8* materialIndices,
-                    uint32 width, uint32 height, CanvasState* canvas, LinearAllocator* allocator, AppWorkQueue* queue)
+void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
+                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas,
+                    LinearAllocator* allocator, AppWorkQueue* queue)
 {
     ZoneScoped;
     UNREFERENCED_PARAMETER(materialIndices);
@@ -443,8 +442,20 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
                 *decay = 0xff;
             }
         }
-        if (materialIndices[i] == 0) {
-            canvas->colorHdr[i] = Vec3::one;
+
+        if (materialIndices[i] == 0xff) {
+            // The Void
+        }
+        else {
+            const RaycastMaterial& material = geometry.materials[materialIndices[i]];
+            if (material.emission > 0.0f) {
+                // light
+                canvas->colorHdr[i] = material.emissionColor;
+                *decay = canvas->decayFrames - 1;
+            }
+            else {
+                // surface
+            }
         }
     }
 
@@ -454,13 +465,13 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, const RaycastGeometry& geome
     const Vec3 cameraLeft = inverseCameraRot * Vec3::unitY;
 
     const float32 filmDist = 1.0f;
-    const float32 filmWidth = 2.0f;
-    const float32 filmHeight = filmWidth * (float32)height / (float32)width;
+    const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
+    const float32 filmWidth = filmHeight * (float32)width / (float32)height;
 
     const Vec3 filmTopLeft = cameraPos + cameraForward * filmDist
-        + filmWidth / 2.0f * cameraUp + filmHeight / 2.0f * cameraLeft;
-    const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)width;
-    const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)height;
+        + (filmWidth / 2.0f + canvas->test2) * cameraUp + (filmHeight / 2.0f + canvas->test3) * cameraLeft;
+    const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)(width - 1);
+    const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)(height - 1);
 
     const RaycastThreadWorkCommon workCommon = {
         .geometry = &geometry,

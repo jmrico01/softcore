@@ -19,6 +19,7 @@ struct VulkanMeshPipeline
 
     VkRenderPass renderPass;
 
+    VulkanImage colorImage;
     VulkanImage materialIndexImage;
     VkImage materialIndexImageDst;
     VkDeviceMemory materialIndexImageDstMemory;

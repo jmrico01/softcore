@@ -1,15 +1,14 @@
 #include "mesh.h"
 
-const VkFormat MATERIAL_INDEX_FORMAT = VK_FORMAT_R8_UINT;
+const VkFormat MATERIAL_INDEX_IMAGE_FORMAT = VK_FORMAT_R8_UINT;
+const VkFormat MATERIAL_INDEX_VERTEX_FORMAT = VK_FORMAT_R32_UINT;
 
-#pragma pack(push, 1)
 struct VulkanMeshVertex
 {
     Vec3 pos;
     Vec3 normal;
-    uint8 materialIndex;
+    uint32 materialIndex;
 };
-#pragma pack(pop)
 
 using VulkanMeshTriangle = StaticArray<VulkanMeshVertex, 3>;
 
@@ -81,57 +80,70 @@ internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator*
 bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain, VkCommandPool commandPool,
                                LinearAllocator* allocator, VulkanMeshPipeline* meshPipeline)
 {
-    VkFormatProperties formatProperties;
-    vkGetPhysicalDeviceFormatProperties(window.physicalDevice, MATERIAL_INDEX_FORMAT, &formatProperties);
-    if ((formatProperties.linearTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) == 0) {
+    VkFormatProperties imageFormatP;
+    vkGetPhysicalDeviceFormatProperties(window.physicalDevice, MATERIAL_INDEX_IMAGE_FORMAT, &imageFormatP);
+    if ((imageFormatP.linearTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) == 0) {
         LOG_ERROR("Material index format not eligible as transfer src for linear tiling\n");
         return false;
     }
-    if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) == 0) {
+    if ((imageFormatP.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) == 0) {
         LOG_ERROR("Material index format not eligible as transfer dst for optimal tiling\n");
         return false;
     }
-    if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0) {
+    if ((imageFormatP.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0) {
         LOG_ERROR("Material index format not eligible as color attachment for optimal tiling\n");
         return false;
     }
-    if ((formatProperties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) == 0) {
+
+    VkFormatProperties vertexFormatP;
+    vkGetPhysicalDeviceFormatProperties(window.physicalDevice, MATERIAL_INDEX_VERTEX_FORMAT, &vertexFormatP);
+    if ((vertexFormatP.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) == 0) {
         LOG_ERROR("Material index format not eligible as vertex buffer input\n");
         return false;
     }
 
     // Create render pass
     {
-        VkAttachmentDescription attachments[2] = {};
+        VkAttachmentDescription attachments[3] = {};
 
-        // TODO possibly save a GPU-local color buffer for later compositing with ray traced image
-
-        // Attachment 0 - material index
-        attachments[0].format = MATERIAL_INDEX_FORMAT;
+        // Attachment 0 - color
+        attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
         attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-        // Attachment 1 - depth
-        attachments[1].format = VK_FORMAT_D32_SFLOAT;
+        // Attachment 1 - material index
+        attachments[1].format = MATERIAL_INDEX_IMAGE_FORMAT;
         attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
         attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
-        VkAttachmentReference colorAttachmentRefs[1] = {};
+        // Attachment 2 - depth
+        attachments[2].format = VK_FORMAT_D32_SFLOAT;
+        attachments[2].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[2].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[2].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[2].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[2].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[2].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorAttachmentRefs[2] = {};
         colorAttachmentRefs[0].attachment = 0;
         colorAttachmentRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachmentRefs[1].attachment = 1;
+        colorAttachmentRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
         VkAttachmentReference depthAttachmentRef = {};
-        depthAttachmentRef.attachment = 1;
+        depthAttachmentRef.attachment = 2;
         depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkSubpassDescription subpass = {};
@@ -163,11 +175,27 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
         }
     }
 
-    // Create color attachment and dst image
+    // Create color attachments
     {
         if (!CreateImage(window.device, window.physicalDevice,
                          swapchain.extent.width, swapchain.extent.height,
-                         MATERIAL_INDEX_FORMAT, VK_IMAGE_TILING_OPTIMAL,
+                         VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &meshPipeline->colorImage.image, &meshPipeline->colorImage.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, meshPipeline->colorImage.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_ASPECT_COLOR_BIT, &meshPipeline->colorImage.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+
+        if (!CreateImage(window.device, window.physicalDevice,
+                         swapchain.extent.width, swapchain.extent.height,
+                         MATERIAL_INDEX_IMAGE_FORMAT, VK_IMAGE_TILING_OPTIMAL,
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                          &meshPipeline->materialIndexImage.image, &meshPipeline->materialIndexImage.memory)) {
@@ -175,7 +203,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
             return false;
         }
 
-        if (!CreateImageView(window.device, meshPipeline->materialIndexImage.image, MATERIAL_INDEX_FORMAT,
+        if (!CreateImageView(window.device, meshPipeline->materialIndexImage.image, MATERIAL_INDEX_IMAGE_FORMAT,
                              VK_IMAGE_ASPECT_COLOR_BIT, &meshPipeline->materialIndexImage.view)) {
             LOG_ERROR("CreateImageView failed\n");
             return false;
@@ -183,7 +211,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
 
         if (!CreateImage(window.device, window.physicalDevice,
                          swapchain.extent.width, swapchain.extent.height,
-                         MATERIAL_INDEX_FORMAT, VK_IMAGE_TILING_LINEAR,
+                         MATERIAL_INDEX_IMAGE_FORMAT, VK_IMAGE_TILING_LINEAR,
                          VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                          &meshPipeline->materialIndexImageDst, &meshPipeline->materialIndexImageDstMemory)) {
@@ -218,6 +246,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
     // Create framebuffers
     {
         const VkImageView attachments[] = {
+            meshPipeline->colorImage.view,
             meshPipeline->materialIndexImage.view,
             meshPipeline->depthImage.view,
         };
@@ -299,7 +328,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
 
         attributeDescriptions[2].binding = 0;
         attributeDescriptions[2].location = 2;
-        attributeDescriptions[2].format = MATERIAL_INDEX_FORMAT;
+        attributeDescriptions[2].format = MATERIAL_INDEX_VERTEX_FORMAT;
         attributeDescriptions[2].offset = offsetof(VulkanMeshVertex, materialIndex);
 
         VkPipelineVertexInputStateCreateInfo vertexInputCreateInfo = {};
@@ -355,8 +384,11 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
         multisampleCreateInfo.alphaToCoverageEnable = VK_FALSE;
         multisampleCreateInfo.alphaToOneEnable = VK_FALSE;
 
-        VkPipelineColorBlendAttachmentState colorBlendAttachments[1] = {};
+        VkPipelineColorBlendAttachmentState colorBlendAttachments[2] = {};
+        colorBlendAttachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         colorBlendAttachments[0].blendEnable = VK_FALSE;
+        colorBlendAttachments[1].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachments[1].blendEnable = VK_FALSE;
 
         VkPipelineColorBlendStateCreateInfo colorBlendingCreateInfo = {};
         colorBlendingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -430,8 +462,25 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
         }
 
         const VkClearValue clearValues[] = {
-            { 0, 0, 0, 0 },
-            { 1.0f, 0 }
+            // color
+            {
+                .color = {
+                    .float32 = { 0.0f, 0.0f, 0.0f, 0.0f }
+                },
+            },
+            // material index
+            {
+                .color = {
+                    .uint32 = { 0xff, 0, 0, 0 }
+                },
+            },
+            // depth
+            {
+                .depthStencil = {
+                    .depth = 1.0f,
+                    .stencil = 0
+                },
+            }
         };
 
         VkRenderPassBeginInfo renderPassInfo = {};
@@ -502,6 +551,7 @@ void UnloadMeshPipelineSwapchain(VkDevice device, VulkanMeshPipeline* meshPipeli
     vkDestroyImage(device, meshPipeline->materialIndexImageDst, nullptr);
     vkFreeMemory(device, meshPipeline->materialIndexImageDstMemory, nullptr);
     DestroyVulkanImage(device, &meshPipeline->materialIndexImage);
+    DestroyVulkanImage(device, &meshPipeline->colorImage);
 
     vkDestroyRenderPass(device, meshPipeline->renderPass, nullptr);
 }

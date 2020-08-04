@@ -18,8 +18,6 @@
 enum class SpriteId
 {
     PIXEL,
-    JON,
-    ROCK,
 
     COUNT
 };
