@@ -1,7 +1,11 @@
 #pragma once
 
-#define TRACY_ENABLE
+// #define TRACY_ENABLE
 #include <TracyClient.cpp>
+
+#ifdef TRACY_ENABLE
+#pragma message("PROFILING ENABLED")
+#endif
 
 #include <km_common/app/km_log.h>
 
@@ -12,8 +16,8 @@
 #include <km_common/vulkan/km_vulkan_text.h>
 
 #include "imgui.h"
-#include "mesh.h"
 #include "raytracer.h"
+#include "render.h"
 
 enum class SpriteId
 {
@@ -40,6 +44,8 @@ struct VulkanAppState
     VkDeviceMemory imageMemory;
 
     VulkanMeshPipeline meshPipeline;
+    VulkanCompositePipeline compositePipeline;
+
     VulkanSpritePipeline<(uint32)SpriteId::COUNT> spritePipeline;
     VulkanTextPipeline<(uint32)FontId::COUNT> textPipeline;
 };
@@ -64,7 +70,6 @@ struct AppState
     bool debugView;
     PanelSliderState inputScreenFillState;
     PanelInputIntState inputDecayFramesState;
-    PanelInputIntState inputSamplesState;
     PanelInputIntState inputBouncesState;
     PanelDropdownState inputSceneDropdownState;
 };

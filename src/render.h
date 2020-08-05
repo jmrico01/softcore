@@ -40,10 +40,32 @@ struct MeshUniformBufferObject
     alignas(16) Mat4 proj;
 };
 
+struct VulkanCompositePipeline
+{
+    VulkanBuffer vertexBuffer;
+    VkSampler sampler;
+
+    VkDescriptorSetLayout descriptorSetLayout;
+    VkDescriptorPool descriptorPool;
+    VkDescriptorSet descriptorSet;
+
+    VkPipelineLayout pipelineLayout;
+    VkPipeline pipeline;
+};
+
 bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain, VkCommandPool commandPool,
                                LinearAllocator* allocator, VulkanMeshPipeline* meshPipeline);
 void UnloadMeshPipelineSwapchain(VkDevice device, VulkanMeshPipeline* meshPipeline);
 
-bool LoadMeshPipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
-                            VulkanMeshPipeline* meshPipeline);
+bool LoadMeshPipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, const LoadObjResult& obj,
+                            LinearAllocator* allocator, VulkanMeshPipeline* meshPipeline);
 void UnloadMeshPipelineWindow(VkDevice device, VulkanMeshPipeline* meshPipeline);
+
+bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain,
+                                    VkImageView imageView, LinearAllocator* allocator,
+                                    VulkanCompositePipeline* compositePipeline);
+void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* compositePipeline);
+
+bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
+                                 VulkanCompositePipeline* compositePipeline);
+void UnloadCompositePipelineWindow(VkDevice device, VulkanCompositePipeline* compositePipeline);

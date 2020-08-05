@@ -5,6 +5,7 @@
 
 #include <stb_image_write.h>
 #include <Tracy.hpp>
+#include <TracyC.h>
 
 struct RandomSeries
 {
@@ -85,6 +86,45 @@ void StopAndPrintDebugTimer(DebugTimer* timer)
     StopDebugTimer(timer);
     const float32 win32Time = (float32)timer->win32Time / DebugTimer::win32Freq * 1000.0f;
     LOG_INFO("Timer: %.03fms | %llu MC\n", win32Time, timer->cycles / 1000000);
+}
+
+bool GetMaterial(const_string name, RaycastMaterial* material)
+{
+    if (StringEquals(name, ToString("Surfaces"))) {
+        material->smoothness = 0.8f;
+        material->albedo = Vec3 { 1.0f, 1.0f, 1.0f };
+        material->emission = 0.0f;
+        material->emissionColor = Vec3::zero;
+    }
+    else if (StringEquals(name, ToString("LightHardGreen"))) {
+        material->smoothness = 0.0f;
+        material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->emission = 1.5f;
+        material->emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+    }
+    else if (StringEquals(name, ToString("LightSoftGreen"))) {
+        material->smoothness = 0.0f;
+        material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->emission = 1.0f;
+        material->emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+    }
+    else if (StringEquals(name, ToString("LightPink"))) {
+        material->smoothness = 0.0f;
+        material->albedo = Vec3 { 0.9294f, 0.651f, 1.0f };
+        material->emission = 1.0f;
+        material->emissionColor = Vec3 { 0.9294f, 0.651f, 1.0f };
+    }
+    else if (StringEquals(name, ToString("LightRed"))) {
+        material->smoothness = 0.0f;
+        material->albedo = Vec3 { 1.0f, 0.0f, 0.082f };
+        material->emission = 1.5f;
+        material->emissionColor = Vec3 { 1.0f, 0.0f, 0.082f };
+    }
+    else {
+        return false;
+    }
+
+    return true;
 }
 
 bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles, bool firstPass, 
@@ -174,41 +214,9 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
     }
 
     for (uint32 i = 0; i < obj.materials.size; i++) {
-        const_string name = obj.materials[i].name;
-        RaycastMaterial& material = geometry.materials[i];
-
-        if (StringEquals(name, ToString("Surfaces")) || StringEquals(name, ToString("None"))) {
-            material.smoothness = 0.8f;
-            material.albedo = Vec3 { 1.0f, 1.0f, 1.0f };
-            material.emission = 0.0f;
-            material.emissionColor = Vec3::zero;
-        }
-        else if (StringEquals(name, ToString("LightHardGreen"))) {
-            material.smoothness = 0.0f;
-            material.albedo = Vec3 { 0.0f, 1.0f, 0.42f };
-            material.emission = 1.5f;
-            material.emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
-        }
-        else if (StringEquals(name, ToString("LightSoftGreen"))) {
-            material.smoothness = 0.0f;
-            material.albedo = Vec3 { 0.0f, 1.0f, 0.42f };
-            material.emission = 1.0f;
-            material.emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
-        }
-        else if (StringEquals(name, ToString("LightPink"))) {
-            material.smoothness = 0.0f;
-            material.albedo = Vec3 { 0.9294f, 0.651f, 1.0f };
-            material.emission = 1.0f;
-            material.emissionColor = Vec3 { 0.9294f, 0.651f, 1.0f };
-        }
-        else if (StringEquals(name, ToString("LightRed"))) {
-            material.smoothness = 0.0f;
-            material.albedo = Vec3 { 1.0f, 0.0f, 0.082f };
-            material.emission = 1.5f;
-            material.emissionColor = Vec3 { 1.0f, 0.0f, 0.082f };
-        }
-        else {
-            LOG_ERROR("Unrecognized material: %.*s\n", name.size, name.data);
+        const_string materialName = obj.materials[i].name;
+        if (!GetMaterial(materialName, &geometry.materials[i])) {
+            LOG_ERROR("Unrecognized material: %.*s\n", materialName.size, materialName.data);
             return geometry;
         }
     }
@@ -329,7 +337,7 @@ bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 mi
     return hit;
 }
 
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 samples, uint32 bounces, float32 minDist, float32 maxDist,
+Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, float32 maxDist,
                   const RaycastGeometry& geometry, RandomSeries* series)
 {
     ZoneScoped;
@@ -337,43 +345,40 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 samples, uint32 bounces, f
     // TODO have some guarantee that this stack will be big enough
     const RaycastMeshBvh* bvhStack[4096];
 
-    const float32 sampleWeight = 1.0f / (float32)samples;
     Vec3 color = Vec3::zero;
-    for (uint32 s = 0; s < samples; s++) {
-        for (uint32 b = 0; b < bounces; b++) {
-            const Vec3 inverseRayDir = Reciprocal(rayDir);
+    for (uint32 b = 0; b < bounces; b++) {
+        const Vec3 inverseRayDir = Reciprocal(rayDir);
 
-            uint32 hitMaterialIndex = geometry.materials.size;
-            Vec3 hitNormal = Vec3::zero;
-            float32 hitDist = maxDist;
-            for (uint32 i = 0; i < geometry.meshes.size; i++) {
-                const RaycastMesh& mesh = geometry.meshes[i];
-                bvhStack[0] = &mesh.bvh;
-                TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, bvhStack,
-                                &hitMaterialIndex, &hitNormal, &hitDist);
-            }
+        uint32 hitMaterialIndex = geometry.materials.size;
+        Vec3 hitNormal = Vec3::zero;
+        float32 hitDist = maxDist;
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            const RaycastMesh& mesh = geometry.meshes[i];
+            bvhStack[0] = &mesh.bvh;
+            TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, bvhStack,
+                            &hitMaterialIndex, &hitNormal, &hitDist);
+        }
 
-            if (hitMaterialIndex == geometry.materials.size) {
-                break;
-            }
+        if (hitMaterialIndex == geometry.materials.size) {
+            break;
+        }
 
-            const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialIndex];
-            if (hitMaterial.emission > 0.0f) {
-                color += sampleWeight * hitMaterial.emission * hitMaterial.emissionColor;
-                break;
-            }
-            else {
-                rayOrigin += rayDir * hitDist;
+        const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialIndex];
+        if (hitMaterial.emission > 0.0f) {
+            color = hitMaterial.emission * hitMaterial.emissionColor;
+            break;
+        }
+        else {
+            rayOrigin += rayDir * hitDist;
 
-                const Quat xToNormal = QuatRotBetweenVectors(Vec3::unitX, hitNormal);
-                const Vec3 pureBounce = rayDir - 2.0f * Dot(rayDir, hitNormal) * hitNormal;
-                const Vec3 randomBounce = xToNormal * NormalizeOrZero(Vec3 {
-                                                                          RandomUnilateral(series),
-                                                                          RandomBilateral(series),
-                                                                          RandomBilateral(series),
-                                                                      });
-                rayDir = NormalizeOrZero(Lerp(randomBounce, pureBounce, hitMaterial.smoothness));
-            }
+            const Quat xToNormal = QuatRotBetweenVectors(Vec3::unitX, hitNormal);
+            const Vec3 pureBounce = rayDir - 2.0f * Dot(rayDir, hitNormal) * hitNormal;
+            const Vec3 randomBounce = xToNormal * NormalizeOrZero(Vec3 {
+                                                                      RandomUnilateral(series),
+                                                                      RandomBilateral(series),
+                                                                      RandomBilateral(series),
+                                                                  });
+            rayDir = NormalizeOrZero(Lerp(randomBounce, pureBounce, hitMaterial.smoothness));
         }
     }
 
@@ -387,7 +392,6 @@ struct RaycastThreadWorkCommon
     Vec3 filmUnitOffsetX;
     Vec3 filmUnitOffsetY;
     Vec3 cameraPos;
-    uint32 samples;
     uint32 bounces;
     float32 minDist;
     float32 maxDist;
@@ -418,11 +422,9 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
         const Vec3 filmOffsetY = work->common->filmUnitOffsetY * (float32)work->pixels[i].y;
         const Vec3 filmPos = work->common->filmTopLeft + filmOffsetX + filmOffsetY;
         const Vec3 rayDir = Normalize(filmPos - work->common->cameraPos);
-        work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir,
-                                             work->common->samples, work->common->bounces,
+        work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir, work->common->bounces,
                                              work->common->minDist, work->common->maxDist,
-                                             *(work->common->geometry),
-                                             &work->state->threadRandomSeries[threadIndex]);
+                                             *(work->common->geometry), &work->state->threadRandomSeries[threadIndex]);
     }
 }
 
@@ -430,9 +432,12 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
                     const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas,
                     LinearAllocator* allocator, AppWorkQueue* queue)
 {
-    ZoneScoped;
     UNREFERENCED_PARAMETER(materialIndices);
+    ZoneScoped;
 
+    TracyCZoneN(zonePixelDecay, "PixelDecay", true);
+
+#if 0
     for (uint32 i = 0; i < width * height; i++) {
         uint8* decay = &canvas->decay.data[i];
         if (*decay != 0xff) {
@@ -442,22 +447,13 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
                 *decay = 0xff;
             }
         }
-
-        if (materialIndices[i] == 0xff) {
-            // The Void
-        }
-        else {
-            const RaycastMaterial& material = geometry.materials[materialIndices[i]];
-            if (material.emission > 0.0f) {
-                // light
-                canvas->colorHdr[i] = material.emissionColor;
-                *decay = canvas->decayFrames - 1;
-            }
-            else {
-                // surface
-            }
-        }
     }
+#endif
+    MemSet(canvas->colorHdr.data, 0, width * height * sizeof(Vec3));
+
+    TracyCZoneEnd(zonePixelDecay);
+
+    TracyCZoneN(zoneProduceWork, "ProduceWork", true);
 
     const Quat inverseCameraRot = Inverse(cameraRot);
     const Vec3 cameraUp = inverseCameraRot * Vec3::unitZ;
@@ -479,7 +475,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         .filmUnitOffsetX = filmUnitOffsetX,
         .filmUnitOffsetY = filmUnitOffsetY,
         .cameraPos = cameraPos,
-        .samples = canvas->samples,
         .bounces = canvas->bounces,
         .minDist = 0.0f,
         .maxDist = 20.0f,
@@ -488,7 +483,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     RandomSeries series;
     const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
     series.state = seed;
-    series.state = (uint32)rand();
+    // series.state = (uint32)rand();
 
     const uint32 numThreads = GetCpuCount();
     RaycastThreadWorkState workState = {};
@@ -519,10 +514,17 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         }
     }
 
-    CompleteAllWork(queue, 0);
+    TracyCZoneEnd(zoneProduceWork);
 
-    const float32 neighborIntensity = 0.0f;
-    const float32 prevWeight = 0.0f;
+    {
+        ZoneScopedN("FinishWork");
+        CompleteAllWork(queue, 0);
+    }
+
+    TracyCZoneN(zoneBlend, "Blend", true);
+
+    const float32 neighborIntensity = 0.5f;
+    const float32 prevWeight = 0.5f;
     for (uint32 i = 0; i < workEntries.size; i++) {
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
             const Vec2Int pixel = workEntries[i].pixels[j];
@@ -555,4 +557,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             }
         }
     }
+
+    TracyCZoneEnd(zoneBlend);
 }

@@ -16,6 +16,14 @@
 
 #define BEGIN_INTERIOR 1
 
+#define DISCRETE_GPU 1
+
+#if BEGIN_INTERIOR
+const_string START_SCENE = ToString("interior-1");
+#else
+const_string START_SCENE = ToString("light-cones");
+#endif
+
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
@@ -50,14 +58,18 @@ internal TransientState* GetTransientState(AppMemory* memory)
     return transientState;
 }
 
-internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator* allocator)
+internal bool LoadSceneObj(const_string scene, LinearAllocator* allocator, LoadObjResult* obj)
 {
     const_string scenePath = AllocPrintf(allocator, "data/models/%.*s.obj", scene.size, scene.data);
+    return LoadObj(scenePath, Vec3::zero, 1.0f, obj, allocator);
+}
 
+internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator* allocator,
+                        const VulkanWindow& window, const VulkanSwapchain& swapchain, VkCommandPool commandPool)
+{
     LoadObjResult obj;
-    if (!LoadObj(scenePath, Vec3::zero, 1.0f, &obj, allocator)) {
-        LOG_ERROR("Failed to load obj file \"%.*s\" for scene %.*s\n", scenePath.size, scenePath.data,
-                  scene.size, scene.data);
+    if (!LoadSceneObj(scene, allocator, &obj)) {
+        LOG_ERROR("Failed to load obj file for scene %.*s\n", scene.size, scene.data);
         return false;
     }
 
@@ -78,13 +90,25 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
              scene.size, scene.data, geometry.meshes.size, totalTriangles);
     appState->raycastGeometry = geometry;
 
+    VulkanMeshPipeline* meshPipeline = &appState->vulkanAppState.meshPipeline;
+    UnloadMeshPipelineSwapchain(window.device, meshPipeline);
+    UnloadMeshPipelineWindow(window.device, meshPipeline);
+    if (!LoadMeshPipelineWindow(window, commandPool, obj, allocator, meshPipeline)) {
+        LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+    if (!LoadMeshPipelineSwapchain(window, swapchain, commandPool, allocator, meshPipeline)) {
+        LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+
     return true;
 }
 
 APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 {
     UNREFERENCED_PARAMETER(audio);
-    FrameMark;
+    ZoneScoped;
 
     AppState* appState = GetAppState(memory);
     TransientState* transientState = GetTransientState(memory);
@@ -120,7 +144,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->canvas.screenFill = 1.0f / 60.0f;
         appState->canvas.decayFrames = 2;
-        appState->canvas.samples = 8;
         appState->canvas.bounces = 4;
 
         // It's a mystery...
@@ -134,11 +157,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         {
             LinearAllocator allocator(transientState->scratch);
 
-#if BEGIN_INTERIOR
-            LoadScene(ToString("interior-1"), appState, &allocator);
-#else
-            LoadScene(ToString("light-cones"), appState, &allocator);
-#endif
+            LoadScene(START_SCENE, appState, &allocator, vulkanState.window, vulkanState.swapchain,
+                      appState->vulkanAppState.commandPool);
         }
 
         // Debug views 
@@ -147,7 +167,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->inputScreenFillState.value = appState->canvas.screenFill;
         appState->inputDecayFramesState.Initialize(appState->canvas.decayFrames);
-        appState->inputSamplesState.Initialize(appState->canvas.samples);
         appState->inputBouncesState.Initialize(appState->canvas.bounces);
 
         memory->initialized = true;
@@ -155,7 +174,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     // Reset frame state
     {
-        // ResetMeshRenderState(&transientState->frameState.meshRenderState);
         ResetSpriteRenderState(&transientState->frameState.spriteRenderState);
         ResetTextRenderState(&transientState->frameState.textRenderState);
     }
@@ -296,15 +314,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
 
-        panelDebugInfo.Text(ToString("Samples (at least 1)"));
-        if (panelDebugInfo.InputInt(&appState->inputSamplesState)) {
-            const int value = appState->inputSamplesState.value;
-            if (value > 0) {
-                appState->canvas.samples = appState->inputSamplesState.value;
-                LOG_INFO("Set samples: %d\n", appState->canvas.samples);
-            }
-        }
-
         panelDebugInfo.Text(ToString("Bounces (at least 1)"));
         if (panelDebugInfo.InputInt(&appState->inputBouncesState)) {
             const int value = appState->inputBouncesState.value;
@@ -329,7 +338,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             panelDebugInfo.Text(ToString("Load scene"));
             if (panelDebugInfo.Dropdown(&appState->inputSceneDropdownState, scenes.ToArray())) {
                 const_string scene = scenes[appState->inputSceneDropdownState.selected];
-                if (LoadScene(scene, appState, &allocator)) {
+                if (LoadScene(scene, appState, &allocator, vulkanState.window, vulkanState.swapchain,
+                              appState->vulkanAppState.commandPool)) {
                     LOG_INFO("Loaded scene %.*s\n", scene.size, scene.data);
                 }
                 else {
@@ -411,6 +421,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         LinearAllocator allocator(transientState->scratch);
 
         uint8* materialIndices = allocator.New<uint8>(screenSize.x * screenSize.y);
+#if !DISCRETE_GPU
         {
             ZoneScopedN("ReadMaterialIndices");
 
@@ -422,6 +433,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             MemCopy(materialIndices, data, materialIndicesSize);
             vkUnmapMemory(vulkanState.window.device, materialIndexMemory);
         }
+#endif
 
         const uint32 numPixels = screenSize.x * screenSize.y;
         RaytraceRender(appState->cameraPos, cameraRot, fov, appState->raycastGeometry, materialIndices,
@@ -449,7 +461,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const uint8 b = (uint8)(colorNormalized.b * 255.0f);
             pixels[i] = ((uint32)r << 16) + ((uint32)g << 8) + b;
         }
-        // MemCopy(imageMemory, appState->pixels.data, numBytes);
+
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
     }
 
@@ -483,13 +495,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         LOG_ERROR("vkBeginCommandBuffer failed\n");
     }
 
-    TransitionImageLayout(buffer, appState->vulkanAppState.image,
-                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    TransitionImageLayout(buffer, appState->vulkanAppState.image,
-                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    TransitionImageLayout(buffer, vulkanState.swapchain.images[swapchainImageIndex],
-                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-
     VkImageSubresourceLayers imageSubresourceLayers;
     imageSubresourceLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     imageSubresourceLayers.mipLevel = 0;
@@ -509,13 +514,15 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     imageCopy.extent.height = screenSize.y;
     imageCopy.extent.depth = 1;
 
+    TransitionImageLayout(buffer, vulkanState.swapchain.images[swapchainImageIndex],
+                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkCmdCopyImage(buffer,
                    appState->vulkanAppState.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    vulkanState.swapchain.images[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &imageCopy);
 
     const VkClearValue clearValues[] = {
-        { 0.0f, 0.0f, 0.0f, 1.0f },
+        { 0.0f, 0.0f, 0.0f, 0.0f }, // ignored, loaded img preserved
         { 1.0f, 0 }
     };
 
@@ -530,16 +537,21 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     vkCmdBeginRenderPass(buffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-#if 0
-    // Meshes
+    // Composite
     {
-        PushMesh(MeshId::INTERIOR1, Mat4::one, Vec3::one, Vec3::zero, 0.0f, &transientState->frameState.meshRenderState);
+        const VulkanCompositePipeline& compositePipeline = appState->vulkanAppState.compositePipeline;
 
-        LinearAllocator allocator(transientState->scratch);
-        UploadAndSubmitMeshDrawCommands(vulkanState.window.device, buffer, appState->vulkanAppState.meshPipeline,
-                                        transientState->frameState.meshRenderState, view, proj, &allocator);
+        vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline.pipeline);
+
+        const VkBuffer vertexBuffers[] = { compositePipeline.vertexBuffer.buffer };
+        const VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(buffer, 0, C_ARRAY_LENGTH(vertexBuffers), vertexBuffers, offsets);
+
+        vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline.pipelineLayout, 0, 1,
+                                &compositePipeline.descriptorSet, 0, nullptr);
+
+        vkCmdDraw(buffer, 6, 1, 0, 0);
     }
-#endif
 
     // Sprites
     {
@@ -594,16 +606,45 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
     TransientState* transientState = GetTransientState(memory);
     LinearAllocator allocator(transientState->scratch);
 
-    // Create image
-    if (!CreateImage(window.device, window.physicalDevice, swapchain.extent.width, swapchain.extent.height,
-                     VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                     &app->image, &app->imageMemory)) {
-        LOG_ERROR("CreateImage failed\n");
-        return false;
+    // Create images
+    {
+        if (!CreateImage(window.device, window.physicalDevice, swapchain.extent.width, swapchain.extent.height,
+                         VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         &app->image, &app->imageMemory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
+        TransitionImageLayout(commandBuffer, app->image,
+                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+#if 0
+        if (!CreateImage(window.device, window.physicalDevice, swapchain.extent.width, swapchain.extent.height,
+                         VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &app->imageSampled.image, &app->imageSampled.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, app->imageSampled.image, VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_ASPECT_COLOR_BIT,
+                             &app->imageSampled.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+#endif
     }
 
     if (!LoadMeshPipelineSwapchain(window, swapchain, app->commandPool, &allocator, &app->meshPipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+
+    if (!LoadCompositePipelineSwapchain(window, swapchain, app->meshPipeline.colorImage.view, &allocator,
+                                        &app->compositePipeline)) {
+        LOG_ERROR("Failed to load swapchain-dependent Vulkan composite pipeline\n");
         return false;
     }
 
@@ -629,6 +670,7 @@ APP_UNLOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppUnloadVulkanSwapchainState)
 
     UnloadTextPipelineSwapchain(device, &app->textPipeline);
     UnloadSpritePipelineSwapchain(device, &app->spritePipeline);
+    UnloadCompositePipelineSwapchain(device, &app->compositePipeline);
     UnloadMeshPipelineSwapchain(device, &app->meshPipeline);
 
     vkDestroyImage(device, app->image, nullptr);
@@ -687,9 +729,22 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
         }
     }
 
-    const bool meshPipeline = LoadMeshPipelineWindow(window, app->commandPool, &allocator, &app->meshPipeline);
+    LoadObjResult obj;
+    if (!LoadSceneObj(START_SCENE, &allocator, &obj)) {
+        LOG_ERROR("Failed to load obj file for scene %.*s\n", START_SCENE.size, START_SCENE.data);
+        return false;
+    }
+
+    const bool meshPipeline = LoadMeshPipelineWindow(window, app->commandPool, obj, &allocator, &app->meshPipeline);
     if (!meshPipeline) {
         LOG_ERROR("Failed to load window-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+
+    const bool compositePipeline = LoadCompositePipelineWindow(window, app->commandPool, &allocator,
+                                                               &app->compositePipeline);
+    if (!compositePipeline) {
+        LOG_ERROR("Failed to load window-dependent Vulkan composite pipeline\n");
         return false;
     }
 
@@ -795,6 +850,7 @@ APP_UNLOAD_VULKAN_WINDOW_STATE_FUNCTION(AppUnloadVulkanWindowState)
 
     UnloadTextPipelineWindow(device, &app->textPipeline);
     UnloadSpritePipelineWindow(device, &app->spritePipeline);
+    UnloadCompositePipelineWindow(device, &app->compositePipeline);
     UnloadMeshPipelineWindow(device, &app->meshPipeline);
 
     vkDestroyFence(device, app->fence, nullptr);
@@ -802,8 +858,8 @@ APP_UNLOAD_VULKAN_WINDOW_STATE_FUNCTION(AppUnloadVulkanWindowState)
 }
 
 #include "imgui.cpp"
-#include "mesh.cpp"
 #include "raytracer.cpp"
+#include "render.cpp"
 
 #include <km_common/km_array.cpp>
 #include <km_common/km_container.cpp>

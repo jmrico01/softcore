@@ -39,6 +39,8 @@ struct RaycastGeometry
     Array<RaycastMesh> meshes;
 };
 
+bool GetMaterial(const_string name, RaycastMaterial* material);
+
 RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTriangles,
                                       LinearAllocator* allocator, LinearAllocator* tempAllocator);
 
@@ -53,7 +55,6 @@ struct CanvasState
     float32 screenFill;
     uint8 decayFrames;
     uint32 bounces;
-    uint32 samples;
 
     float32 test1;
     float32 test2;

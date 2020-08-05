@@ -1,4 +1,4 @@
-#include "mesh.h"
+#include "render.h"
 
 const VkFormat MATERIAL_INDEX_IMAGE_FORMAT = VK_FORMAT_R8_UINT;
 const VkFormat MATERIAL_INDEX_VERTEX_FORMAT = VK_FORMAT_R32_UINT;
@@ -7,6 +7,7 @@ struct VulkanMeshVertex
 {
     Vec3 pos;
     Vec3 normal;
+    Vec4 color;
     uint32 materialIndex;
 };
 
@@ -16,6 +17,12 @@ struct VulkanMeshGeometry
 {
     Array<uint32> meshEndInds;
     Array<VulkanMeshTriangle> triangles;
+};
+
+struct VulkanCompositeVertex
+{
+    Vec2 pos;
+    Vec2 uv;
 };
 
 internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator* allocator, VulkanMeshGeometry* geometry)
@@ -34,8 +41,6 @@ internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator*
         return false;
     }
 
-    const Vec3 color = Vec3::one;
-
     uint32 endInd = 0;
     for (uint32 i = 0; i < obj.models.size; i++) {
         for (uint32 j = 0; j < obj.models[i].triangles.size; j++) {
@@ -43,9 +48,21 @@ internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator*
             const uint32 tInd = endInd + j;
             const Vec3 normal = CalculateTriangleUnitNormal(t.v[0].pos, t.v[1].pos, t.v[2].pos);
 
+            const_string materialName = obj.materials[t.materialIndex].name;
+            RaycastMaterial material;
+            if (!GetMaterial(materialName, &material)) {
+                LOG_ERROR("Unrecognized material: %.*s\n", materialName.size, materialName.data);
+                return false;
+            }
+            Vec4 color = Vec4::zero;
+            if (material.emission > 0.0f) {
+                color = ToVec4(material.emissionColor, 1.0f);
+            }
+
             for (int k = 0; k < 3; k++) {
                 geometry->triangles[tInd][k].pos = t.v[k].pos;
                 geometry->triangles[tInd][k].normal = normal;
+                geometry->triangles[tInd][k].color = color;
                 geometry->triangles[tInd][k].materialIndex = t.materialIndex;
             }
         }
@@ -56,9 +73,21 @@ internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator*
             const uint32 tInd = endInd + j * 2;
             const Vec3 normal = CalculateTriangleUnitNormal(q.v[0].pos, q.v[1].pos, q.v[2].pos);
 
+            const_string materialName = obj.materials[q.materialIndex].name;
+            RaycastMaterial material;
+            if (!GetMaterial(materialName, &material)) {
+                LOG_ERROR("Unrecognized material: %.*s\n", materialName.size, materialName.data);
+                return false;
+            }
+            Vec4 color = Vec4::zero;
+            if (material.emission > 0.0f) {
+                color = ToVec4(material.emissionColor, 1.0f);
+            }
+
             for (int k = 0; k < 3; k++) {
                 geometry->triangles[tInd][k].pos = q.v[k].pos;
                 geometry->triangles[tInd][k].normal = normal;
+                geometry->triangles[tInd][k].color = color;
                 geometry->triangles[tInd][k].materialIndex = q.materialIndex;
             }
 
@@ -66,6 +95,7 @@ internal bool ObjToVulkanMeshGeometry(const LoadObjResult& obj, LinearAllocator*
                 const uint32 quadInd = (k + 2) % 4;
                 geometry->triangles[tInd + 1][k].pos = q.v[quadInd].pos;
                 geometry->triangles[tInd + 1][k].normal = normal;
+                geometry->triangles[tInd + 1][k].color = color;
                 geometry->triangles[tInd + 1][k].materialIndex = q.materialIndex;
             }
         }
@@ -328,8 +358,13 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
 
         attributeDescriptions[2].binding = 0;
         attributeDescriptions[2].location = 2;
-        attributeDescriptions[2].format = MATERIAL_INDEX_VERTEX_FORMAT;
-        attributeDescriptions[2].offset = offsetof(VulkanMeshVertex, materialIndex);
+        attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributeDescriptions[2].offset = offsetof(VulkanMeshVertex, color);
+
+        attributeDescriptions[3].binding = 0;
+        attributeDescriptions[3].location = 3;
+        attributeDescriptions[3].format = MATERIAL_INDEX_VERTEX_FORMAT;
+        attributeDescriptions[3].offset = offsetof(VulkanMeshVertex, materialIndex);
 
         VkPipelineVertexInputStateCreateInfo vertexInputCreateInfo = {};
         vertexInputCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -507,6 +542,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
 
         vkCmdEndRenderPass(meshPipeline->commandBuffer);
 
+#if 0
         VkImageSubresourceLayers imageSubresourceLayers;
         imageSubresourceLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         imageSubresourceLayers.mipLevel = 0;
@@ -530,6 +566,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
                        meshPipeline->materialIndexImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        meshPipeline->materialIndexImageDst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                        1, &imageCopy);
+#endif
 
         if (vkEndCommandBuffer(meshPipeline->commandBuffer) != VK_SUCCESS) {
             LOG_ERROR("vkEndCommandBuffer failed\n");
@@ -556,21 +593,11 @@ void UnloadMeshPipelineSwapchain(VkDevice device, VulkanMeshPipeline* meshPipeli
     vkDestroyRenderPass(device, meshPipeline->renderPass, nullptr);
 }
 
-bool LoadMeshPipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
-                            VulkanMeshPipeline* meshPipeline)
+bool LoadMeshPipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, const LoadObjResult& obj,
+                            LinearAllocator* allocator, VulkanMeshPipeline* meshPipeline)
 {
     // Create vertex buffers
     {
-        SCOPED_ALLOCATOR_RESET(*allocator);
-
-        const_string objPath = ToString("data/models/interior-1.obj");
-
-        LoadObjResult obj;
-        if (!LoadObj(objPath, Vec3::zero, 1.0f, &obj, allocator)) {
-            LOG_ERROR("Failed to load obj file %.*s\n", objPath.size, objPath.data);
-            return false;
-        }
-
         VulkanMeshGeometry geometry;
         if (!ObjToVulkanMeshGeometry(obj, allocator, &geometry)) {
             LOG_ERROR("Failed to load Vulkan geometry from obj\n");
@@ -737,4 +764,359 @@ void UnloadMeshPipelineWindow(VkDevice device, VulkanMeshPipeline* meshPipeline)
 
     DestroyVulkanBuffer(device, &meshPipeline->uniformBuffer);
     DestroyVulkanBuffer(device, &meshPipeline->vertexBuffer);
+}
+
+bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain,
+                                    VkImageView imageView, LinearAllocator* allocator,
+                                    VulkanCompositePipeline* compositePipeline)
+{
+    UNREFERENCED_PARAMETER(allocator);
+
+    // Create descriptor set layout
+    {
+        VkDescriptorSetLayoutBinding samplerLayoutBinding = {};
+        samplerLayoutBinding.binding = 0;
+        samplerLayoutBinding.descriptorCount = 1;
+        samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBinding.pImmutableSamplers = nullptr;
+        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.bindingCount = 1;
+        layoutCreateInfo.pBindings = &samplerLayoutBinding;
+
+        if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
+                                        &compositePipeline->descriptorSetLayout) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateDescriptorSetLayout failed\n");
+            return false;
+        }
+    }
+
+    // Create descriptor pool
+    {
+        VkDescriptorPoolSize poolSize = {};
+        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSize.descriptorCount = 1;
+
+        VkDescriptorPoolCreateInfo poolInfo = {};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.maxSets = 1;
+
+        if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &compositePipeline->descriptorPool) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateDescriptorPool failed\n");
+            return false;
+        }
+    }
+
+    // Create descriptor set
+    {
+        VkDescriptorSetAllocateInfo allocInfo = {};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = compositePipeline->descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &compositePipeline->descriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(window.device, &allocInfo, &compositePipeline->descriptorSet) != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateDescriptorSets failed\n");
+            return false;
+        }
+
+        VkDescriptorImageInfo imageInfo = {};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView = imageView;
+        imageInfo.sampler = compositePipeline->sampler;
+
+        VkWriteDescriptorSet descriptorWrite = {};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = compositePipeline->descriptorSet;
+        descriptorWrite.dstBinding = 0;
+        descriptorWrite.dstArrayElement = 0;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &imageInfo;
+
+        vkUpdateDescriptorSets(window.device, 1, &descriptorWrite, 0, nullptr);
+    }
+
+    // Create pipeline
+    {
+        const Array<uint8> vertShaderCode = LoadEntireFile(ToString("data/shaders/composite.vert.spv"), allocator);
+        if (vertShaderCode.data == nullptr) {
+            LOG_ERROR("Failed to load vertex shader code\n");
+            return false;
+        }
+        const Array<uint8> fragShaderCode = LoadEntireFile(ToString("data/shaders/composite.frag.spv"), allocator);
+        if (fragShaderCode.data == nullptr) {
+            LOG_ERROR("Failed to load fragment shader code\n");
+            return false;
+        }
+
+        VkShaderModule vertShaderModule;
+        if (!CreateShaderModule(vertShaderCode, window.device, &vertShaderModule)) {
+            LOG_ERROR("Failed to create vertex shader module\n");
+            return false;
+        }
+        defer(vkDestroyShaderModule(window.device, vertShaderModule, nullptr));
+
+        VkShaderModule fragShaderModule;
+        if (!CreateShaderModule(fragShaderCode, window.device, &fragShaderModule)) {
+            LOG_ERROR("Failed to create fragment shader module\n");
+            return false;
+        }
+        defer(vkDestroyShaderModule(window.device, fragShaderModule, nullptr));
+
+        VkPipelineShaderStageCreateInfo vertShaderStageCreateInfo = {};
+        vertShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageCreateInfo.module = vertShaderModule;
+        vertShaderStageCreateInfo.pName = "main";
+        // vertShaderStageCreateInfo.pSpecializationInfo is useful for setting shader constants
+
+        VkPipelineShaderStageCreateInfo fragShaderStageCreateInfo = {};
+        fragShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageCreateInfo.module = fragShaderModule;
+        fragShaderStageCreateInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageCreateInfo, fragShaderStageCreateInfo };
+
+        VkVertexInputBindingDescription bindingDescription = {};
+        bindingDescription.binding = 0;
+        bindingDescription.stride = sizeof(VulkanCompositeVertex);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+        VkVertexInputAttributeDescription attributeDescriptions[2] = {};
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(VulkanCompositeVertex, pos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(VulkanCompositeVertex, uv);
+
+        VkPipelineVertexInputStateCreateInfo vertexInputCreateInfo = {};
+        vertexInputCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputCreateInfo.vertexBindingDescriptionCount = 1;
+        vertexInputCreateInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputCreateInfo.vertexAttributeDescriptionCount = C_ARRAY_LENGTH(attributeDescriptions);
+        vertexInputCreateInfo.pVertexAttributeDescriptions = attributeDescriptions;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssemblyCreateInfo = {};
+        inputAssemblyCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssemblyCreateInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        inputAssemblyCreateInfo.primitiveRestartEnable = VK_FALSE;
+
+        VkViewport viewport = {};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float32)swapchain.extent.width;
+        viewport.height = (float32)swapchain.extent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor = {};
+        scissor.offset = { 0, 0 };
+        scissor.extent = swapchain.extent;
+
+        VkPipelineViewportStateCreateInfo viewportStateCreateInfo = {};
+        viewportStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportStateCreateInfo.viewportCount = 1;
+        viewportStateCreateInfo.pViewports = &viewport;
+        viewportStateCreateInfo.scissorCount = 1;
+        viewportStateCreateInfo.pScissors = &scissor;
+
+        VkPipelineRasterizationStateCreateInfo rasterizerCreateInfo = {};
+        rasterizerCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizerCreateInfo.depthClampEnable = VK_FALSE;
+        rasterizerCreateInfo.rasterizerDiscardEnable = VK_FALSE;
+        rasterizerCreateInfo.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizerCreateInfo.lineWidth = 1.0f;
+        rasterizerCreateInfo.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizerCreateInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        rasterizerCreateInfo.depthBiasEnable = VK_FALSE;
+        rasterizerCreateInfo.depthBiasConstantFactor = 0.0f;
+        rasterizerCreateInfo.depthBiasClamp = 0.0f;
+        rasterizerCreateInfo.depthBiasSlopeFactor = 0.0f;
+
+        VkPipelineMultisampleStateCreateInfo multisampleCreateInfo = {};
+        multisampleCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampleCreateInfo.sampleShadingEnable = VK_FALSE;
+        multisampleCreateInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampleCreateInfo.minSampleShading = 1.0f;
+        multisampleCreateInfo.pSampleMask = nullptr;
+        multisampleCreateInfo.alphaToCoverageEnable = VK_FALSE;
+        multisampleCreateInfo.alphaToOneEnable = VK_FALSE;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo colorBlendingCreateInfo = {};
+        colorBlendingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlendingCreateInfo.logicOpEnable = VK_FALSE;
+        colorBlendingCreateInfo.logicOp = VK_LOGIC_OP_COPY;
+        colorBlendingCreateInfo.attachmentCount = 1;
+        colorBlendingCreateInfo.pAttachments = &colorBlendAttachment;
+        colorBlendingCreateInfo.blendConstants[0] = 0.0f;
+        colorBlendingCreateInfo.blendConstants[1] = 0.0f;
+        colorBlendingCreateInfo.blendConstants[2] = 0.0f;
+        colorBlendingCreateInfo.blendConstants[3] = 0.0f;
+
+        VkPipelineDepthStencilStateCreateInfo depthStencilCreateInfo = {};
+        depthStencilCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencilCreateInfo.depthTestEnable = VK_TRUE;
+        depthStencilCreateInfo.depthWriteEnable = VK_TRUE;
+        depthStencilCreateInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencilCreateInfo.depthBoundsTestEnable = VK_FALSE;
+        depthStencilCreateInfo.minDepthBounds = 0.0f; // disabled
+        depthStencilCreateInfo.maxDepthBounds = 1.0f; // disabled
+        depthStencilCreateInfo.stencilTestEnable = VK_FALSE;
+
+        VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+        pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutCreateInfo.setLayoutCount = 1;
+        pipelineLayoutCreateInfo.pSetLayouts = &compositePipeline->descriptorSetLayout;
+        pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
+        pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
+
+        if (vkCreatePipelineLayout(window.device, &pipelineLayoutCreateInfo, nullptr,
+                                   &compositePipeline->pipelineLayout) != VK_SUCCESS) {
+            LOG_ERROR("vkCreatePipelineLayout failed\n");
+            return false;
+        }
+
+        VkGraphicsPipelineCreateInfo pipelineCreateInfo = {};
+        pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineCreateInfo.stageCount = C_ARRAY_LENGTH(shaderStages);
+        pipelineCreateInfo.pStages = shaderStages;
+        pipelineCreateInfo.pVertexInputState = &vertexInputCreateInfo;
+        pipelineCreateInfo.pInputAssemblyState = &inputAssemblyCreateInfo;
+        pipelineCreateInfo.pViewportState = &viewportStateCreateInfo;
+        pipelineCreateInfo.pRasterizationState = &rasterizerCreateInfo;
+        pipelineCreateInfo.pMultisampleState = &multisampleCreateInfo;
+        pipelineCreateInfo.pDepthStencilState = &depthStencilCreateInfo;
+        pipelineCreateInfo.pColorBlendState = &colorBlendingCreateInfo;
+        pipelineCreateInfo.pDynamicState = nullptr;
+        pipelineCreateInfo.layout = compositePipeline->pipelineLayout;
+        pipelineCreateInfo.renderPass = swapchain.renderPass;
+        pipelineCreateInfo.subpass = 0;
+        pipelineCreateInfo.basePipelineHandle = VK_NULL_HANDLE;
+        pipelineCreateInfo.basePipelineIndex = -1;
+
+        if (vkCreateGraphicsPipelines(window.device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr,
+                                      &compositePipeline->pipeline) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateGraphicsPipeline failed\n");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* compositePipeline)
+{
+    vkDestroyPipeline(device, compositePipeline->pipeline, nullptr);
+    vkDestroyPipelineLayout(device, compositePipeline->pipelineLayout, nullptr);
+
+    vkDestroyDescriptorPool(device, compositePipeline->descriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, compositePipeline->descriptorSetLayout, nullptr);
+}
+
+bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
+                                 VulkanCompositePipeline* compositePipeline)
+{
+    UNREFERENCED_PARAMETER(allocator);
+
+    // Create vertex buffer
+    {
+        const VulkanCompositeVertex VERTICES[] = {
+            { { -1.0f, -1.0f }, { 0.0f, 0.0f } },
+            { {  1.0f, -1.0f }, { 1.0f, 0.0f } },
+            { {  1.0f,  1.0f }, { 1.0f, 1.0f } },
+
+            { {  1.0f,  1.0f }, { 1.0f, 1.0f } },
+            { { -1.0f,  1.0f }, { 0.0f, 1.0f } },
+            { { -1.0f, -1.0f }, { 0.0f, 0.0f } },
+        };
+
+        const VkDeviceSize vertexBufferSize = C_ARRAY_LENGTH(VERTICES) * sizeof(VulkanCompositeVertex);
+
+        VulkanBuffer stagingBuffer;
+        if (!CreateVulkanBuffer(vertexBufferSize,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &stagingBuffer)) {
+            LOG_ERROR("CreateBuffer failed for staging buffer\n");
+            return false;
+        }
+
+        // Copy vertex data from CPU into memory-mapped staging buffer
+        void* data;
+        vkMapMemory(window.device, stagingBuffer.memory, 0, vertexBufferSize, 0, &data);
+
+        MemCopy(data, VERTICES, vertexBufferSize);
+
+        vkUnmapMemory(window.device, stagingBuffer.memory);
+
+        if (!CreateVulkanBuffer(vertexBufferSize,
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                window.device, window.physicalDevice,
+                                &compositePipeline->vertexBuffer)) {
+            LOG_ERROR("CreateBuffer failed for vertex buffer\n");
+            return false;
+        }
+
+        // Copy vertex data from staging buffer into GPU vertex buffer
+        VkCommandBuffer commandBuffer = BeginOneTimeCommands(window.device, commandPool);
+        CopyBuffer(commandBuffer, stagingBuffer.buffer, compositePipeline->vertexBuffer.buffer, vertexBufferSize);
+        EndOneTimeCommands(window.device, commandPool, window.graphicsQueue, commandBuffer);
+
+        DestroyVulkanBuffer(window.device, &stagingBuffer);
+    }
+
+    // Create texture sampler
+    {
+        VkSamplerCreateInfo createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        createInfo.magFilter = VK_FILTER_NEAREST;
+        createInfo.minFilter = VK_FILTER_NEAREST;
+        createInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        createInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        createInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        createInfo.anisotropyEnable = VK_FALSE;
+        createInfo.maxAnisotropy = 1.0f;
+        createInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        createInfo.unnormalizedCoordinates = VK_FALSE;
+        createInfo.compareEnable = VK_FALSE;
+        createInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+        createInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        createInfo.mipLodBias = 0.0f;
+        createInfo.minLod = 0.0f;
+        createInfo.maxLod = 0.0f;
+
+        if (vkCreateSampler(window.device, &createInfo, nullptr, &compositePipeline->sampler) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateSampler failed\n");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void UnloadCompositePipelineWindow(VkDevice device, VulkanCompositePipeline* compositePipeline)
+{
+    vkDestroySampler(device, compositePipeline->sampler, nullptr);
+    DestroyVulkanBuffer(device, &compositePipeline->vertexBuffer);
 }
