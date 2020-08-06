@@ -344,7 +344,7 @@ bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain
         bindingDescription.stride = sizeof(VulkanMeshVertex);
         bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-        VkVertexInputAttributeDescription attributeDescriptions[3] = {};
+        VkVertexInputAttributeDescription attributeDescriptions[4] = {};
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
@@ -767,24 +767,50 @@ void UnloadMeshPipelineWindow(VkDevice device, VulkanMeshPipeline* meshPipeline)
 }
 
 bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain,
-                                    VkImageView imageView, LinearAllocator* allocator,
+                                    VkImageView rasterizedImageView, LinearAllocator* allocator,
                                     VulkanCompositePipeline* compositePipeline)
 {
     UNREFERENCED_PARAMETER(allocator);
 
+    // Create raytraced image
+    {
+        if (!CreateImage(window.device, window.physicalDevice,
+                         swapchain.extent.width, swapchain.extent.height,
+                         VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &compositePipeline->raytracedImage.image, &compositePipeline->raytracedImage.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, compositePipeline->raytracedImage.image, VK_FORMAT_R8G8B8A8_UNORM,
+                             VK_IMAGE_ASPECT_COLOR_BIT, &compositePipeline->raytracedImage.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+    }
+
     // Create descriptor set layout
     {
-        VkDescriptorSetLayoutBinding samplerLayoutBinding = {};
-        samplerLayoutBinding.binding = 0;
-        samplerLayoutBinding.descriptorCount = 1;
-        samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        samplerLayoutBinding.pImmutableSamplers = nullptr;
-        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutBinding samplerLayoutBindings[2] = {};
+
+        samplerLayoutBindings[0].binding = 0;
+        samplerLayoutBindings[0].descriptorCount = 1;
+        samplerLayoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBindings[0].pImmutableSamplers = nullptr;
+        samplerLayoutBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        samplerLayoutBindings[1].binding = 1;
+        samplerLayoutBindings[1].descriptorCount = 1;
+        samplerLayoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBindings[1].pImmutableSamplers = nullptr;
+        samplerLayoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = 1;
-        layoutCreateInfo.pBindings = &samplerLayoutBinding;
+        layoutCreateInfo.bindingCount = C_ARRAY_LENGTH(samplerLayoutBindings);
+        layoutCreateInfo.pBindings = samplerLayoutBindings;
 
         if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
                                         &compositePipeline->descriptorSetLayout) != VK_SUCCESS) {
@@ -797,7 +823,7 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
     {
         VkDescriptorPoolSize poolSize = {};
         poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSize.descriptorCount = 1;
+        poolSize.descriptorCount = 2;
 
         VkDescriptorPoolCreateInfo poolInfo = {};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -824,21 +850,34 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
             return false;
         }
 
-        VkDescriptorImageInfo imageInfo = {};
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView = imageView;
-        imageInfo.sampler = compositePipeline->sampler;
+        VkWriteDescriptorSet descriptorWrites[2] = {};
+        VkDescriptorImageInfo imageInfos[2] = {};
 
-        VkWriteDescriptorSet descriptorWrite = {};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = compositePipeline->descriptorSet;
-        descriptorWrite.dstBinding = 0;
-        descriptorWrite.dstArrayElement = 0;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &imageInfo;
+        imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[0].imageView = rasterizedImageView;
+        imageInfos[0].sampler = compositePipeline->sampler;
 
-        vkUpdateDescriptorSets(window.device, 1, &descriptorWrite, 0, nullptr);
+        descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[0].dstSet = compositePipeline->descriptorSet;
+        descriptorWrites[0].dstBinding = 0;
+        descriptorWrites[0].dstArrayElement = 0;
+        descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[0].descriptorCount = 1;
+        descriptorWrites[0].pImageInfo = &imageInfos[0];
+
+        imageInfos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[1].imageView = compositePipeline->raytracedImage.view;
+        imageInfos[1].sampler = compositePipeline->sampler;
+
+        descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[1].dstSet = compositePipeline->descriptorSet;
+        descriptorWrites[1].dstBinding = 1;
+        descriptorWrites[1].dstArrayElement = 0;
+        descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[1].descriptorCount = 1;
+        descriptorWrites[1].pImageInfo = &imageInfos[1];
+
+        vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
     }
 
     // Create pipeline
@@ -1031,6 +1070,8 @@ void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* 
 
     vkDestroyDescriptorPool(device, compositePipeline->descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, compositePipeline->descriptorSetLayout, nullptr);
+
+    DestroyVulkanImage(device, &compositePipeline->raytracedImage);
 }
 
 bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,

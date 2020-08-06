@@ -43,6 +43,8 @@ struct MeshUniformBufferObject
 struct VulkanCompositePipeline
 {
     VulkanBuffer vertexBuffer;
+
+    VulkanImage raytracedImage;
     VkSampler sampler;
 
     VkDescriptorSetLayout descriptorSetLayout;

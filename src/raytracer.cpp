@@ -226,9 +226,11 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
         return geometry;
     }
 
-    const Vec3 vertexColor = Vec3::zero;
+    uint32 maxBvhTrianglesInd = obj.models.size;
+    uint32 maxBvhTriangles = 0;
 
     for (uint32 i = 0; i < obj.models.size; i++) {
+        const_string name = obj.models[i].name;
         RaycastMesh& mesh = geometry.meshes[i];
 
         const uint32 numTriangles = obj.models[i].triangles.size + obj.models[i].quads.size * 2;
@@ -236,7 +238,7 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
 
         Array<RaycastTriangle> triangles = tempAllocator->NewArray<RaycastTriangle>(numTriangles);
         if (triangles.data == nullptr) {
-            LOG_ERROR("Failed to allocate triangles for raycast mesh %lu\n", i);
+            LOG_ERROR("Failed to allocate triangles for raycast mesh %.*s\n", name.size, name.data);
             geometry.meshes.data = nullptr;
             return geometry;
         }
@@ -272,11 +274,34 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
 
         const Box veryBigBox = { .min = -Vec3::one * 1e8, .max = Vec3::one * 1e8 };
         if (!FillRaycastMeshBvh(&mesh.bvh, veryBigBox, boxMaxTriangles, true, triangles, allocator, tempAllocator)) {
-            LOG_ERROR("Failed to fill raycast mesh box for mesh %lu\n", i);
+            LOG_ERROR("Failed to fill raycast mesh box for mesh %.*s\n", name.size, name.data);
             geometry.meshes.data = nullptr;
             return geometry;
         }
+
+        DynamicArray<RaycastMeshBvh*, LinearAllocator> bvhStack(tempAllocator);
+        bvhStack.Append(&mesh.bvh);
+        while (bvhStack.size > 0) {
+            RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
+            bvhStack.RemoveLast();
+
+            if (bvh->child1 == nullptr) {
+                if (bvh->triangles.size > maxBvhTriangles) {
+                    maxBvhTrianglesInd = i;
+                    maxBvhTriangles = bvh->triangles.size;
+                }
+            }
+            else {
+                bvhStack.Append(bvh->child1);
+                bvhStack.Append(bvh->child2);
+            }
+        }
     }
+
+    DEBUG_ASSERT(maxBvhTrianglesInd != obj.models.size);
+    const_string maxBvhTrianglesName = obj.models[maxBvhTrianglesInd].name;
+    LOG_INFO("Mesh %.*s has max BVH triangles: %lu\n",
+             maxBvhTrianglesName.size, maxBvhTrianglesName.data, maxBvhTriangles);
 
     return geometry;
 }
@@ -308,8 +333,11 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTri
     return hit;
 }
 
+const uint32 BVH_STACK_SIZE = 4096;
+
 bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 minDist,
-                     const RaycastMeshBvh* bvhStack[], uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
+                     const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE],
+                     uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
     uint32 n = 1;
 
@@ -338,12 +366,9 @@ bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 mi
 }
 
 Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, float32 maxDist,
-                  const RaycastGeometry& geometry, RandomSeries* series)
+                  const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE], const RaycastGeometry& geometry, RandomSeries* series)
 {
     ZoneScoped;
-
-    // TODO have some guarantee that this stack will be big enough
-    const RaycastMeshBvh* bvhStack[4096];
 
     Vec3 color = Vec3::zero;
     for (uint32 b = 0; b < bounces; b++) {
@@ -416,6 +441,9 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 {
     UNREFERENCED_PARAMETER(queue);
 
+    // TODO have some guarantee that this stack will be big enough
+    const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE];
+
     RaycastThreadWork* work = (RaycastThreadWork*)data;
     for (uint32 i = 0; i < work->PIXELS_PER_WORK_UNIT; i++) {
         const Vec3 filmOffsetX = work->common->filmUnitOffsetX * (float32)work->pixels[i].x;
@@ -423,35 +451,36 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
         const Vec3 filmPos = work->common->filmTopLeft + filmOffsetX + filmOffsetY;
         const Vec3 rayDir = Normalize(filmPos - work->common->cameraPos);
         work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir, work->common->bounces,
-                                             work->common->minDist, work->common->maxDist,
+                                             work->common->minDist, work->common->maxDist, bvhStack,
                                              *(work->common->geometry), &work->state->threadRandomSeries[threadIndex]);
     }
 }
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas,
+                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue)
 {
     UNREFERENCED_PARAMETER(materialIndices);
     ZoneScoped;
 
-    TracyCZoneN(zonePixelDecay, "PixelDecay", true);
+    {
+        ZoneScopedN("PixelDecay");
 
 #if 0
-    for (uint32 i = 0; i < width * height; i++) {
-        uint8* decay = &canvas->decay.data[i];
-        if (*decay != 0xff) {
-            (*decay) += 1;
-            if (*decay >= canvas->decayFrames) {
-                canvas->colorHdr[i] = Vec3::zero;
-                *decay = 0xff;
+        for (uint32 i = 0; i < width * height; i++) {
+            uint8* decay = &canvas->decay.data[i];
+            if (*decay != 0xff) {
+                (*decay) += 1;
+                if (*decay >= canvas->decayFrames) {
+                    canvas->colorHdr[i] = Vec3::zero;
+                    *decay = 0xff;
+                }
             }
         }
-    }
 #endif
-    MemSet(canvas->colorHdr.data, 0, width * height * sizeof(Vec3));
 
-    TracyCZoneEnd(zonePixelDecay);
+        MemSet(canvas->colorHdr.data, 0, width * height * sizeof(Vec3));
+    }
 
     TracyCZoneN(zoneProduceWork, "ProduceWork", true);
 
@@ -523,8 +552,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
 
     TracyCZoneN(zoneBlend, "Blend", true);
 
-    const float32 neighborIntensity = 0.5f;
-    const float32 prevWeight = 0.5f;
+    const float32 prevWeight = 0.0f;
     for (uint32 i = 0; i < workEntries.size; i++) {
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
             const Vec2Int pixel = workEntries[i].pixels[j];
@@ -533,30 +561,31 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             const uint32 index = pixel.y * width + pixel.x;
             const Vec3 prevColor = canvas->colorHdr[index];
             canvas->colorHdr[index] = Lerp(color, prevColor + color, prevWeight);
-            canvas->decay[index] = 0;
-
-            if (pixel.x > 0) {
-                const uint32 indexLeft = index - 1;
-                canvas->colorHdr[indexLeft] += color * neighborIntensity;
-                canvas->decay[indexLeft] = 0;
-            }
-            if ((uint32)pixel.x < width - 1) {
-                const uint32 indexRight = index + 1;
-                canvas->colorHdr[indexRight] += color * neighborIntensity;
-                canvas->decay[indexRight] = 0;
-            }
-            if (pixel.y > 0) {
-                const uint32 indexTop = index - width;
-                canvas->colorHdr[indexTop] += color * neighborIntensity;
-                canvas->decay[indexTop] = 0;
-            }
-            if ((uint32)pixel.y < height - 1) {
-                const uint32 indexBottom = index + width;
-                canvas->colorHdr[indexBottom] += color * neighborIntensity;
-                canvas->decay[indexBottom] = 0;
-            }
         }
     }
 
     TracyCZoneEnd(zoneBlend);
+
+    TracyCZoneN(zoneHdrTranslate, "TranslateHdr", true);
+
+    const uint32 numPixels = width * height;
+
+    float32 maxColor = 1.0f;
+    for (uint32 i = 0; i < numPixels; i++) {
+        const Vec3 colorHdr = canvas->colorHdr[i];
+        maxColor = MaxFloat32(maxColor, colorHdr.r);
+        maxColor = MaxFloat32(maxColor, colorHdr.g);
+        maxColor = MaxFloat32(maxColor, colorHdr.b);
+    }
+
+    for (uint32 i = 0; i < numPixels; i++) {
+        const Vec3 colorNormalized = canvas->colorHdr[i] / maxColor;
+        // TODO gamma correction?
+        const uint8 r = (uint8)(colorNormalized.r * 255.0f);
+        const uint8 g = (uint8)(colorNormalized.g * 255.0f);
+        const uint8 b = (uint8)(colorNormalized.b * 255.0f);
+        pixels[i] = ((uint32)0xff << 24) + ((uint32)b << 16) + ((uint32)g << 8) + r;
+    }
+
+    TracyCZoneEnd(zoneHdrTranslate);
 }

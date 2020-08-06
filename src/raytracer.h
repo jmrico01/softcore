@@ -65,5 +65,5 @@ struct CanvasState
 };
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas,
+                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue);

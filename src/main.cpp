@@ -91,13 +91,26 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     appState->raycastGeometry = geometry;
 
     VulkanMeshPipeline* meshPipeline = &appState->vulkanAppState.meshPipeline;
+    VulkanCompositePipeline* compositePipeline = &appState->vulkanAppState.compositePipeline;
+
+    UnloadCompositePipelineSwapchain(window.device, compositePipeline);
     UnloadMeshPipelineSwapchain(window.device, meshPipeline);
+    UnloadCompositePipelineWindow(window.device, compositePipeline);
     UnloadMeshPipelineWindow(window.device, meshPipeline);
+
     if (!LoadMeshPipelineWindow(window, commandPool, obj, allocator, meshPipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
+    if (!LoadCompositePipelineWindow(window, commandPool, allocator, compositePipeline)) {
+        LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
     if (!LoadMeshPipelineSwapchain(window, swapchain, commandPool, allocator, meshPipeline)) {
+        LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
+        return false;
+    }
+    if (!LoadCompositePipelineSwapchain(window, swapchain, meshPipeline->colorImage.view, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
@@ -142,7 +155,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->cameraAngles = Vec2 { -2.26f, -0.77f };
 #endif
 
-        appState->canvas.screenFill = 1.0f / 60.0f;
+        appState->canvas.screenFill = 0.1f;
         appState->canvas.decayFrames = 2;
         appState->canvas.bounces = 4;
 
@@ -302,7 +315,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         panelDebugInfo.Text(string::empty);
 
         panelDebugInfo.Text(ToString("Screen fill"));
-        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.1f)) {
+        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.5f)) {
             appState->canvas.screenFill = appState->inputScreenFillState.value;
         }
 
@@ -402,6 +415,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             LOG_ERROR("Failed to submit mesh command buffer\n");
         }
 
+        // TODO right now, CPU takes long enough to raytrace that there's no chance of this work
+        // overlapping with the compositing pass. not guaranteed though, make sure to have some semaphores at least.
+        // If we need the material indices, also need the fence below
         {
             ZoneScopedN("Wait");
 
@@ -435,32 +451,13 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
 #endif
 
-        const uint32 numPixels = screenSize.x * screenSize.y;
-        RaytraceRender(appState->cameraPos, cameraRot, fov, appState->raycastGeometry, materialIndices,
-                       screenSize.x, screenSize.y, &appState->canvas, &allocator, queue);
-
-
-        const uint32 numBytes = numPixels * 4;
+        const uint32 numBytes = screenSize.x * screenSize.y * 4;
         void* imageMemory;
         vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
-
-        float32 maxColor = 1.0f;
-        for (uint32 i = 0; i < numPixels; i++) {
-            const Vec3 colorHdr = appState->canvas.colorHdr[i];
-            maxColor = MaxFloat32(maxColor, colorHdr.r);
-            maxColor = MaxFloat32(maxColor, colorHdr.g);
-            maxColor = MaxFloat32(maxColor, colorHdr.b);
-        }
-
         uint32* pixels = (uint32*)imageMemory;
-        for (uint32 i = 0; i < numPixels; i++) {
-            const Vec3 colorNormalized = appState->canvas.colorHdr[i] / maxColor;
-            // TODO gamma correction?
-            const uint8 r = (uint8)(colorNormalized.r * 255.0f);
-            const uint8 g = (uint8)(colorNormalized.g * 255.0f);
-            const uint8 b = (uint8)(colorNormalized.b * 255.0f);
-            pixels[i] = ((uint32)r << 16) + ((uint32)g << 8) + b;
-        }
+
+        RaytraceRender(appState->cameraPos, cameraRot, fov, appState->raycastGeometry, materialIndices,
+                       screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
     }
@@ -514,15 +511,17 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     imageCopy.extent.height = screenSize.y;
     imageCopy.extent.depth = 1;
 
-    TransitionImageLayout(buffer, vulkanState.swapchain.images[swapchainImageIndex],
+    TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkCmdCopyImage(buffer,
                    appState->vulkanAppState.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   vulkanState.swapchain.images[swapchainImageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   appState->vulkanAppState.compositePipeline.raytracedImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &imageCopy);
+    TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
+                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     const VkClearValue clearValues[] = {
-        { 0.0f, 0.0f, 0.0f, 0.0f }, // ignored, loaded img preserved
+        { 0.0f, 0.0f, 0.0f, 0.0f },
         { 1.0f, 0 }
     };
 
@@ -547,8 +546,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         const VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(buffer, 0, C_ARRAY_LENGTH(vertexBuffers), vertexBuffers, offsets);
 
-        vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline.pipelineLayout, 0, 1,
-                                &compositePipeline.descriptorSet, 0, nullptr);
+        vkCmdBindDescriptorSets(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositePipeline.pipelineLayout, 0,
+                                1, &compositePipeline.descriptorSet, 0, nullptr);
 
         vkCmdDraw(buffer, 6, 1, 0, 0);
     }
