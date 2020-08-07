@@ -16,13 +16,20 @@
 
 #define DISCRETE_GPU 1
 
-// const_string START_SCENE = ToString("interior-1");
-// const Vec3 START_POS     = Vec3 { -1.15f, -2.21f, 0.20f };
-// const Vec3 START_ANGLES  = Vec2 { -1.25f, 0.03f };
+// TODO
+//
+// Raytracing in GPU:
+// 1. Use textures for triangle storage (practically unbounded)
+// 2. Use UBOs for acceleration structures (just need some max-depth bounds)
+//
 
-// const_string START_SCENE = ToString("light-cones");
-// const Vec3 START_POS     = Vec3 { 9.06f, -0.54f, 3.25f };
-// const Vec3 START_ANGLES  = Vec2 { -3.26f, -0.29f };
+//const_string START_SCENE = ToString("interior-1");
+//const Vec3 START_POS     = Vec3 { -1.15f, -2.21f, 0.20f };
+//const Vec2 START_ANGLES  = Vec2 { -1.25f, 0.03f };
+
+//const_string START_SCENE = ToString("light-cones");
+//const Vec3 START_POS     = Vec3 { 9.06f, -0.54f, 3.25f };
+//const Vec2 START_ANGLES  = Vec2 { -3.26f, -0.29f };
 
 const_string START_SCENE = ToString("simple");
 const Vec3 START_POS     = Vec3 { 1.95f, -0.73f, 2.00f };
@@ -387,7 +394,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     // Rendering ======================================================================================
     // ================================================================================================
 
-#if 0
     {
         ZoneScopedN("PreRasterize");
 
@@ -428,7 +434,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
     }
-#endif
 
 #if 0
     // Ray traced rendering
