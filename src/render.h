@@ -43,6 +43,7 @@ struct MeshUniformBufferObject
 struct VulkanCompositePipeline
 {
     VulkanBuffer vertexBuffer;
+    VulkanBuffer uniformBuffer;
 
     VulkanImage raytracedImage;
     VkSampler sampler;
@@ -53,6 +54,37 @@ struct VulkanCompositePipeline
 
     VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
+};
+
+struct CompositeMaterial
+{
+    alignas(16) Vec3 albedo;
+    alignas(16) Vec3 emissionColor;
+    float32 smoothness;
+    float32 emission;
+};
+
+struct CompositeTriangle
+{
+    alignas(16) Vec3 a;
+    alignas(16) Vec3 b;
+    alignas(16) Vec3 c;
+    alignas(16) Vec3 normal;
+    uint32 materialIndex;
+};
+
+struct CompositeUniformBufferObject
+{
+    const static uint32 MAX_TRIANGLES = 512;
+    const static uint32 MAX_MATERIALS = 8;
+
+    alignas(16) CompositeTriangle triangles[MAX_TRIANGLES];
+    alignas(16) CompositeMaterial materials[MAX_MATERIALS];
+    alignas(16) Vec3 filmTopLeft;
+    alignas(16) Vec3 filmUnitOffsetX;
+    alignas(16) Vec3 filmUnitOffsetY;
+    alignas(16) Vec3 cameraPos;
+    uint32 numTriangles;
 };
 
 bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain, VkCommandPool commandPool,

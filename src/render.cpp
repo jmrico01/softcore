@@ -793,7 +793,7 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
 
     // Create descriptor set layout
     {
-        VkDescriptorSetLayoutBinding samplerLayoutBindings[2] = {};
+        VkDescriptorSetLayoutBinding samplerLayoutBindings[3] = {};
 
         samplerLayoutBindings[0].binding = 0;
         samplerLayoutBindings[0].descriptorCount = 1;
@@ -806,6 +806,12 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
         samplerLayoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBindings[1].pImmutableSamplers = nullptr;
         samplerLayoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        samplerLayoutBindings[2].binding = 2;
+        samplerLayoutBindings[2].descriptorCount = 1;
+        samplerLayoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        samplerLayoutBindings[2].pImmutableSamplers = nullptr;
+        samplerLayoutBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -821,14 +827,16 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
 
     // Create descriptor pool
     {
-        VkDescriptorPoolSize poolSize = {};
-        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSize.descriptorCount = 2;
+        VkDescriptorPoolSize poolSizes[2] = {};
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[0].descriptorCount = 2;
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[1].descriptorCount = 1;
 
         VkDescriptorPoolCreateInfo poolInfo = {};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
+        poolInfo.poolSizeCount = C_ARRAY_LENGTH(poolSizes);
+        poolInfo.pPoolSizes = poolSizes;
         poolInfo.maxSets = 1;
 
         if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &compositePipeline->descriptorPool) != VK_SUCCESS) {
@@ -850,8 +858,9 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
             return false;
         }
 
-        VkWriteDescriptorSet descriptorWrites[2] = {};
+        VkWriteDescriptorSet descriptorWrites[3] = {};
         VkDescriptorImageInfo imageInfos[2] = {};
+        VkDescriptorBufferInfo bufferInfo = {};
 
         imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         imageInfos[0].imageView = rasterizedImageView;
@@ -876,6 +885,18 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
         descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         descriptorWrites[1].descriptorCount = 1;
         descriptorWrites[1].pImageInfo = &imageInfos[1];
+
+        bufferInfo.buffer = compositePipeline->uniformBuffer.buffer;
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(CompositeUniformBufferObject);
+
+        descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[2].dstSet = compositePipeline->descriptorSet;
+        descriptorWrites[2].dstBinding = 2;
+        descriptorWrites[2].dstArrayElement = 0;
+        descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrites[2].descriptorCount = 1;
+        descriptorWrites[2].pBufferInfo = &bufferInfo;
 
         vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
     }
@@ -1125,6 +1146,18 @@ bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool comma
         EndOneTimeCommands(window.device, commandPool, window.graphicsQueue, commandBuffer);
 
         DestroyVulkanBuffer(window.device, &stagingBuffer);
+    }
+
+    // Create uniform buffer
+    {
+        VkDeviceSize uniformBufferSize = sizeof(CompositeUniformBufferObject);
+        if (!CreateVulkanBuffer(uniformBufferSize,
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &compositePipeline->uniformBuffer)) {
+            LOG_ERROR("CreateBuffer failed for uniform buffer\n");
+            return false;
+        }
     }
 
     // Create texture sampler

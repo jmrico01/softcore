@@ -16,6 +16,7 @@ TARGET_APP = BuildTarget("softcore",
                 # "-Gs9999999", # Only generate stack probe for stack > 9999999 (so like never)
 
                 "-wd4201", # nonstandard extension used: nameless struct/union
+				"-wd4324", # structure was padded due to alignment specifier
                 "-wd4458", # declaration of X hides class member
                 "-I\"" + WIN32_VULKAN_PATH + "\\Include\"", # TODO HACK
             ],

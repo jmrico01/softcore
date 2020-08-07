@@ -14,15 +14,19 @@
 
 #define ENABLE_THREADS 1
 
-#define BEGIN_INTERIOR 1
-
 #define DISCRETE_GPU 1
 
-#if BEGIN_INTERIOR
-const_string START_SCENE = ToString("interior-1");
-#else
-const_string START_SCENE = ToString("light-cones");
-#endif
+// const_string START_SCENE = ToString("interior-1");
+// const Vec3 START_POS     = Vec3 { -1.15f, -2.21f, 0.20f };
+// const Vec3 START_ANGLES  = Vec2 { -1.25f, 0.03f };
+
+// const_string START_SCENE = ToString("light-cones");
+// const Vec3 START_POS     = Vec3 { 9.06f, -0.54f, 3.25f };
+// const Vec3 START_ANGLES  = Vec2 { -3.26f, -0.29f };
+
+const_string START_SCENE = ToString("simple");
+const Vec3 START_POS     = Vec3 { 1.95f, -0.73f, 2.00f };
+const Vec2 START_ANGLES  = Vec2 { 3.27f, -0.29f };
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
@@ -145,16 +149,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         };
         appState->arenaAllocator = LinearAllocator(appState->arena);
 
-#if BEGIN_INTERIOR
-        // Scene - interiors
-        appState->cameraPos = Vec3 { -1.15f, -2.21f, 0.20f };
-        appState->cameraAngles = Vec2 { -1.25f, 0.03f };
-#else
-        // Scene - light cones
-        appState->cameraPos = Vec3 { 3.74f, -5.21f, 2.49f };
-        appState->cameraAngles = Vec2 { -2.26f, -0.77f };
-#endif
+        appState->cameraPos = START_POS;
+        appState->cameraAngles = START_ANGLES;
 
+        // appState->canvas.screenFill = 1.0f;
         appState->canvas.screenFill = 0.1f;
         appState->canvas.decayFrames = 2;
         appState->canvas.bounces = 4;
@@ -315,7 +313,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         panelDebugInfo.Text(string::empty);
 
         panelDebugInfo.Text(ToString("Screen fill"));
-        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 0.5f)) {
+        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 1.0f)) {
             appState->canvas.screenFill = appState->inputScreenFillState.value;
         }
 
@@ -371,7 +369,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         static PanelSliderState inputTest3 = {
             .value = appState->canvas.test3
         };
-        if (panelDebugInfo.SliderFloat(&inputTest1, 0.75f, 1.0f)) {
+        if (panelDebugInfo.SliderFloat(&inputTest1, 0.0f, 1.0f)) {
             appState->canvas.test1 = inputTest1.value;
         }
         if (panelDebugInfo.SliderFloat(&inputTest2, -0.2f, 0.0f)) {
@@ -430,9 +428,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
     }
 
+#if 0
     // Ray traced rendering
     {
-        ZoneScopedN("RayTraceRender");
+        ZoneScopedN("RaytracedRendering");
 
         LinearAllocator allocator(transientState->scratch);
 
@@ -460,6 +459,102 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                        screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
+    }
+#else
+    UNREFERENCED_PARAMETER(queue);
+#endif
+
+    {
+        LinearAllocator allocator(transientState->scratch);
+
+        const VulkanCompositePipeline& compositePipeline = appState->vulkanAppState.compositePipeline;
+        const RaycastGeometry& geometry = appState->raycastGeometry;
+
+        CompositeUniformBufferObject* compositeUbo = allocator.New<CompositeUniformBufferObject>();
+        {
+            const uint32 width = screenSize.x;
+            const uint32 height = screenSize.y;
+            const Vec3 cameraPos = appState->cameraPos;
+
+            // TODO copy-pasted from raytracer.cpp for now
+            const Quat inverseCameraRot = Inverse(cameraRot);
+            const Vec3 cameraUp2 = inverseCameraRot * Vec3::unitZ;
+            const Vec3 cameraForward2 = inverseCameraRot * Vec3::unitX;
+            const Vec3 cameraLeft2 = inverseCameraRot * Vec3::unitY;
+
+            const float32 filmDist = 1.0f;
+            const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
+            const float32 filmWidth = filmHeight * (float32)width / (float32)height;
+
+            compositeUbo->filmTopLeft = cameraPos + cameraForward2 * filmDist
+                + (filmWidth / 2.0f + -0.136f) * cameraUp2 + (filmHeight / 2.0f + 0.136f) * cameraLeft2;
+            compositeUbo->filmUnitOffsetX = -cameraLeft2 * filmWidth / (float32)(width - 1);
+            compositeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
+            compositeUbo->cameraPos = cameraPos;
+        }
+
+        uint32 numMaterials = 0;
+        for (uint32 i = 0; i < geometry.materials.size; i++) {
+            const RaycastMaterial& srcMaterial = geometry.materials[i];
+            CompositeMaterial* dstMaterial = &compositeUbo->materials[numMaterials++];
+
+            dstMaterial->albedo = srcMaterial.albedo;
+            dstMaterial->smoothness = srcMaterial.smoothness;
+            dstMaterial->emissionColor = srcMaterial.emissionColor;
+            dstMaterial->emission = srcMaterial.emission;
+
+            if (numMaterials >= CompositeUniformBufferObject::MAX_MATERIALS) {
+                break;
+            }
+        }
+
+        DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(&allocator);
+        uint32 numTriangles = 0;
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            bvhStack.Clear();
+            bvhStack.Append(&geometry.meshes[i].bvh);
+            while (bvhStack.size > 0) {
+                const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
+                bvhStack.RemoveLast();
+
+                if (bvh->child1 == nullptr) {
+                    for (uint32 j = 0; j < bvh->triangles.size; j++) {
+                        const RaycastTriangle& srcTriangle = bvh->triangles[j];
+                        CompositeTriangle* dstTriangle = &compositeUbo->triangles[numTriangles++];
+
+                        dstTriangle->a = srcTriangle.pos[0];
+                        dstTriangle->b = srcTriangle.pos[1];
+                        dstTriangle->c = srcTriangle.pos[2];
+                        dstTriangle->normal = srcTriangle.normal;
+                        dstTriangle->materialIndex = srcTriangle.materialIndex;
+
+                        if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
+                            break;
+                        }
+                    }
+
+                    if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
+                        break;
+                    }
+                }
+                else {
+                    bvhStack.Append(bvh->child1);
+                    bvhStack.Append(bvh->child2);
+                }
+            }
+
+            if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
+                break;
+            }
+        }
+
+        compositeUbo->numTriangles = numTriangles;
+
+        void* data;
+        vkMapMemory(vulkanState.window.device, compositePipeline.uniformBuffer.memory, 0,
+                    sizeof(CompositeUniformBufferObject), 0, &data);
+        MemCopy(data, compositeUbo, sizeof(CompositeUniformBufferObject));
+        vkUnmapMemory(vulkanState.window.device, compositePipeline.uniformBuffer.memory);
     }
 
     // Vulkan rendering

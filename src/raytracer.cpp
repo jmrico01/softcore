@@ -91,7 +91,7 @@ void StopAndPrintDebugTimer(DebugTimer* timer)
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
     if (StringEquals(name, ToString("Surfaces"))) {
-        material->smoothness = 0.8f;
+        material->smoothness = 1.0f;
         material->albedo = Vec3 { 1.0f, 1.0f, 1.0f };
         material->emission = 0.0f;
         material->emissionColor = Vec3::zero;
@@ -370,7 +370,9 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, 
 {
     ZoneScoped;
 
+    float32 intensity = 1.0f;
     Vec3 color = Vec3::zero;
+
     for (uint32 b = 0; b < bounces; b++) {
         const Vec3 inverseRayDir = Reciprocal(rayDir);
 
@@ -390,10 +392,11 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, 
 
         const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialIndex];
         if (hitMaterial.emission > 0.0f) {
-            color = hitMaterial.emission * hitMaterial.emissionColor;
+            color = hitMaterial.emission * hitMaterial.emissionColor * intensity;
             break;
         }
         else {
+            intensity *= 0.5f;
             rayOrigin += rayDir * hitDist;
 
             const Quat xToNormal = QuatRotBetweenVectors(Vec3::unitX, hitNormal);
@@ -463,11 +466,13 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     UNREFERENCED_PARAMETER(materialIndices);
     ZoneScoped;
 
+    const uint32 numPixels = width * height;
+
     {
         ZoneScopedN("PixelDecay");
 
 #if 0
-        for (uint32 i = 0; i < width * height; i++) {
+        for (uint32 i = 0; i < numPixels; i++) {
             uint8* decay = &canvas->decay.data[i];
             if (*decay != 0xff) {
                 (*decay) += 1;
@@ -479,7 +484,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         }
 #endif
 
-        MemSet(canvas->colorHdr.data, 0, width * height * sizeof(Vec3));
+        MemSet(canvas->colorHdr.data, 0, numPixels * sizeof(Vec3));
     }
 
     TracyCZoneN(zoneProduceWork, "ProduceWork", true);
@@ -523,23 +528,37 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         workState.threadRandomSeries[i].state = RandomUInt32(&series);
     }
 
-    uint32 NUM_RAYS_PER_FRAME = (uint32)(canvas->screenFill * (float32)width * (float32)height);
-    NUM_RAYS_PER_FRAME = RoundUpToPowerOfTwo(NUM_RAYS_PER_FRAME, RaycastThreadWork::PIXELS_PER_WORK_UNIT);
+    const uint32 screenFillPixels = (uint32)((float32)numPixels * canvas->screenFill);
+    const uint32 maxRays = RoundUpToPowerOfTwo(screenFillPixels, RaycastThreadWork::PIXELS_PER_WORK_UNIT);
+    const uint32 maxWorkEntries = maxRays / RaycastThreadWork::PIXELS_PER_WORK_UNIT;
+    uint32 numWorkEntries = 0;
+    uint32 numWorkEntryPixels = 0;
+    RaycastThreadWork* workEntries = allocator->New<RaycastThreadWork>(maxWorkEntries);
+    workEntries[0].common = &workCommon;
+    workEntries[0].state = &workState;
 
-    const uint32 numWorkEntries = NUM_RAYS_PER_FRAME / RaycastThreadWork::PIXELS_PER_WORK_UNIT;
-    Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
-    for (uint32 i = 0; i < workEntries.size; i++) {
-        workEntries[i].common = &workCommon;
-        workEntries[i].state = &workState;
-        for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
-            workEntries[i].pixels[j].x = RandomInt32(&series, width);
-            workEntries[i].pixels[j].y = RandomInt32(&series, height);
-        }
+    for (uint32 i = 0; i < numPixels; i++) {
+        if (RandomUnilateral(&series) < canvas->screenFill) {
+            workEntries[numWorkEntries].pixels[numWorkEntryPixels].x = i % width;
+            workEntries[numWorkEntries].pixels[numWorkEntryPixels].y = i / width;
 
-        if (!TryAddWork(queue, &RaycastThreadProc, &workEntries[i])) {
-            CompleteAllWork(queue, 0);
-            i--;
-            continue;
+            numWorkEntryPixels++;
+            if (numWorkEntryPixels >= RaycastThreadWork::PIXELS_PER_WORK_UNIT) {
+                if (!TryAddWork(queue, &RaycastThreadProc, &workEntries[numWorkEntries])) {
+                    CompleteAllWork(queue, 0);
+                    numWorkEntryPixels--;
+                    i--;
+                    continue;
+                }
+
+                numWorkEntries++;
+                if (numWorkEntries >= maxWorkEntries) {
+                    break;
+                }
+                workEntries[numWorkEntries].common = &workCommon;
+                workEntries[numWorkEntries].state = &workState;
+                numWorkEntryPixels = 0;
+            }
         }
     }
 
@@ -553,7 +572,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     TracyCZoneN(zoneBlend, "Blend", true);
 
     const float32 prevWeight = 0.0f;
-    for (uint32 i = 0; i < workEntries.size; i++) {
+    for (uint32 i = 0; i < numWorkEntries; i++) {
         for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
             const Vec2Int pixel = workEntries[i].pixels[j];
             const Vec3 color = workEntries[i].outputColors[j];
@@ -567,8 +586,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     TracyCZoneEnd(zoneBlend);
 
     TracyCZoneN(zoneHdrTranslate, "TranslateHdr", true);
-
-    const uint32 numPixels = width * height;
 
     float32 maxColor = 1.0f;
     for (uint32 i = 0; i < numPixels; i++) {

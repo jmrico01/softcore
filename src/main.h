@@ -1,6 +1,6 @@
 #pragma once
 
-// #define TRACY_ENABLE
+#define TRACY_ENABLE
 #include <TracyClient.cpp>
 
 #ifdef TRACY_ENABLE
