@@ -387,6 +387,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     // Rendering ======================================================================================
     // ================================================================================================
 
+#if 0
     {
         ZoneScopedN("PreRasterize");
 
@@ -427,6 +428,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
     }
+#endif
 
 #if 0
     // Ray traced rendering
