@@ -35,27 +35,6 @@ TARGET_APP = BuildTarget("softcore",
     }
 )
 
-TARGET_BENCHMARK = BuildTarget("lightmap_benchmark",
-    source_file="src/lightmap_benchmark.cpp",
-    type=TargetType.EXECUTABLE,
-    defines=[],
-    platform_options={
-        Platform.WINDOWS: PlatformTargetOptions(
-            defines=[],
-            compiler_flags=[
-                "-wd4201",    # nonstandard extension used: nameless struct/union
-                "-I\"" + WIN32_VULKAN_PATH + "\\Include\"", # HACK
-            ],
-            linker_flags=[
-                "-SUBSYSTEM:CONSOLE",
-                "-LIBPATH:\"" + WIN32_VULKAN_PATH + "\\Lib\"", # HACK
-                "user32.lib",
-                "vulkan-1.lib",
-            ]
-        )
-    }
-)
-
 TARGETS = [
     TARGET_APP,
     # TARGET_BENCHMARK

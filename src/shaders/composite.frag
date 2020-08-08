@@ -17,6 +17,7 @@ layout(binding = 1) uniform sampler2D raytracedColor;
 layout(binding = 2) uniform sampler2D triangleGeometry;
 layout(binding = 3) uniform isampler2D triangleMaterials;
 
+/*
 layout(binding = 4) uniform UniformBufferObject {
 	Material materials[8];
 	vec3 filmTopLeft;
@@ -108,6 +109,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 
 	return color;
 }
+*/
 
 // TODO can use raytraced alpha channel for something
 
@@ -128,10 +130,12 @@ void main()
 	vec3 colorBlended = colorRaytraced;// mix(colorRaytraced, colorRasterized.rgb, colorRasterized.a);
     outColor = vec4(colorBlended, 1.0);
 
+/*
 	vec3 filmOffsetX = ubo.filmUnitOffsetX * gl_FragCoord.x;
 	vec3 filmOffsetY = ubo.filmUnitOffsetY * gl_FragCoord.y;
 	vec3 filmPos = ubo.filmTopLeft + filmOffsetX + filmOffsetY;
 	vec3 rayDir = normalize(filmPos - ubo.cameraPos);
 
-	outColor = vec4(RaycastColor(ubo.cameraPos, rayDir), 1.0);
+	//outColor = vec4(RaycastColor(ubo.cameraPos, rayDir), 1.0);
+*/
 }

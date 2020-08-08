@@ -35,6 +35,11 @@ const StartSceneInfo START_SCENE_INFOS[] = {
         .angles = Vec2 { 2.25f, -0.54f },
     },
     {
+        .scene = ToString("interior-2"),
+        .pos = Vec3 { -0.73f, -4.79f, 0.45f },
+        .angles = Vec2 { 4.88f, 0.20f },
+    },
+    {
         .scene = ToString("light-cones"),
         .pos = Vec3 { 9.06f, -0.54f, 3.25f },
         .angles = Vec2 { -3.26f, -0.29f },
@@ -46,7 +51,7 @@ const StartSceneInfo START_SCENE_INFOS[] = {
     },
 };
 
-const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[3];
+const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[2];
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
@@ -447,7 +452,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
     }
 
-#if 0
+#if 1
     // Ray traced rendering
     {
         ZoneScopedN("RaytracedRendering");
