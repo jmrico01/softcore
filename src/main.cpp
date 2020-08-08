@@ -16,13 +16,6 @@
 
 #define DISCRETE_GPU 1
 
-// TODO
-//
-// Raytracing in GPU:
-// 1. Use textures for triangle storage (practically unbounded)
-// 2. Use UBOs for acceleration structures (just need some max-depth bounds)
-//
-
 struct StartSceneInfo
 {
     const_string scene;
