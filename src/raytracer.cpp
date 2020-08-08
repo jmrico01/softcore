@@ -91,7 +91,7 @@ void StopAndPrintDebugTimer(DebugTimer* timer)
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
     if (StringEquals(name, ToString("Surfaces"))) {
-        material->smoothness = 1.0f;
+        material->smoothness = 0.8f;
         material->albedo = Vec3 { 1.0f, 1.0f, 1.0f };
         material->emission = 0.0f;
         material->emissionColor = Vec3::zero;
@@ -322,6 +322,7 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTri
         const bool tIntersect = RayTriangleIntersection(rayOrigin, rayDir,
                                                         triangle.pos[0], triangle.pos[1], triangle.pos[2],
                                                         &t);
+        UNREFERENCED_PARAMETER(minDist);
         if (tIntersect && t > minDist && t < *hitDist) {
             *hitMaterialIndex = triangle.materialIndex;
             *hitNormal = triangle.normal;

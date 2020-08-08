@@ -23,17 +23,37 @@
 // 2. Use UBOs for acceleration structures (just need some max-depth bounds)
 //
 
-//const_string START_SCENE = ToString("interior-1");
-//const Vec3 START_POS     = Vec3 { -1.15f, -2.21f, 0.20f };
-//const Vec2 START_ANGLES  = Vec2 { -1.25f, 0.03f };
+struct StartSceneInfo
+{
+    const_string scene;
+    Vec3 pos;
+    Vec2 angles;
+};
 
-//const_string START_SCENE = ToString("light-cones");
-//const Vec3 START_POS     = Vec3 { 9.06f, -0.54f, 3.25f };
-//const Vec2 START_ANGLES  = Vec2 { -3.26f, -0.29f };
+const StartSceneInfo START_SCENE_INFOS[] = {
+    { // front view
+        .scene = ToString("interior-1"),
+        .pos = Vec3 { -1.15f, -2.21f, 0.20f },
+        .angles = Vec2 { -1.25f, 0.03f },
+    },
+    { // buggy center-box view
+        .scene = ToString("interior-1"),
+        .pos = Vec3 { 0.65f, 0.87f, 0.66f },
+        .angles = Vec2 { 2.25f, -0.54f },
+    },
+    {
+        .scene = ToString("light-cones"),
+        .pos = Vec3 { 9.06f, -0.54f, 3.25f },
+        .angles = Vec2 { -3.26f, -0.29f },
+    },
+    {
+        .scene = ToString("simple"),
+        .pos = Vec3 { 1.95f, -0.73f, 2.00f },
+        .angles = Vec2 { 3.27f, -0.29f },
+    },
+};
 
-const_string START_SCENE = ToString("simple");
-const Vec3 START_POS     = Vec3 { 1.95f, -0.73f, 2.00f };
-const Vec2 START_ANGLES  = Vec2 { 3.27f, -0.29f };
+const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[3];
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
@@ -113,7 +133,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
-    if (!LoadCompositePipelineWindow(window, commandPool, allocator, compositePipeline)) {
+    if (!LoadCompositePipelineWindow(window, commandPool, obj, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
@@ -156,16 +176,15 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         };
         appState->arenaAllocator = LinearAllocator(appState->arena);
 
-        appState->cameraPos = START_POS;
-        appState->cameraAngles = START_ANGLES;
+        appState->cameraPos = START_SCENE_INFO.pos;
+        appState->cameraAngles = START_SCENE_INFO.angles;
 
-        // appState->canvas.screenFill = 1.0f;
-        appState->canvas.screenFill = 0.1f;
+        appState->canvas.screenFill = 0.4f;
         appState->canvas.decayFrames = 2;
         appState->canvas.bounces = 4;
 
-        // It's a mystery...
         appState->canvas.test1 = 0.0f;
+        // It's a mystery...
         appState->canvas.test2 = -0.136f;
         appState->canvas.test3 = 0.136f;
 
@@ -175,7 +194,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         {
             LinearAllocator allocator(transientState->scratch);
 
-            LoadScene(START_SCENE, appState, &allocator, vulkanState.window, vulkanState.swapchain,
+            LoadScene(START_SCENE_INFO.scene, appState, &allocator, vulkanState.window, vulkanState.swapchain,
                       appState->vulkanAppState.commandPool);
         }
 
@@ -515,8 +534,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
 
+        // TODO this is only for counting triangles now. should do this when creating the pipeline
+        // number of triangles could easily be made a shader constant
         DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(&allocator);
-        uint32 numTriangles = 0;
+        compositeUbo->numTriangles = 0;
         for (uint32 i = 0; i < geometry.meshes.size; i++) {
             bvhStack.Clear();
             bvhStack.Append(&geometry.meshes[i].bvh);
@@ -525,37 +546,14 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                 bvhStack.RemoveLast();
 
                 if (bvh->child1 == nullptr) {
-                    for (uint32 j = 0; j < bvh->triangles.size; j++) {
-                        const RaycastTriangle& srcTriangle = bvh->triangles[j];
-                        CompositeTriangle* dstTriangle = &compositeUbo->triangles[numTriangles++];
-
-                        dstTriangle->a = srcTriangle.pos[0];
-                        dstTriangle->b = srcTriangle.pos[1];
-                        dstTriangle->c = srcTriangle.pos[2];
-                        dstTriangle->normal = srcTriangle.normal;
-                        dstTriangle->materialIndex = srcTriangle.materialIndex;
-
-                        if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
-                            break;
-                        }
-                    }
-
-                    if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
-                        break;
-                    }
+                    compositeUbo->numTriangles += bvh->triangles.size;
                 }
                 else {
                     bvhStack.Append(bvh->child1);
                     bvhStack.Append(bvh->child2);
                 }
             }
-
-            if (numTriangles >= CompositeUniformBufferObject::MAX_TRIANGLES) {
-                break;
-            }
         }
-
-        compositeUbo->numTriangles = numTriangles;
 
         void* data;
         vkMapMemory(vulkanState.window.device, compositePipeline.uniformBuffer.memory, 0,
@@ -831,8 +829,8 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
     }
 
     LoadObjResult obj;
-    if (!LoadSceneObj(START_SCENE, &allocator, &obj)) {
-        LOG_ERROR("Failed to load obj file for scene %.*s\n", START_SCENE.size, START_SCENE.data);
+    if (!LoadSceneObj(START_SCENE_INFO.scene, &allocator, &obj)) {
+        LOG_ERROR("Failed to load obj file for scene %.*s\n", START_SCENE_INFO.scene.size, START_SCENE_INFO.scene.data);
         return false;
     }
 
@@ -842,7 +840,7 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
         return false;
     }
 
-    const bool compositePipeline = LoadCompositePipelineWindow(window, app->commandPool, &allocator,
+    const bool compositePipeline = LoadCompositePipelineWindow(window, app->commandPool, obj, &allocator,
                                                                &app->compositePipeline);
     if (!compositePipeline) {
         LOG_ERROR("Failed to load window-dependent Vulkan composite pipeline\n");

@@ -1,5 +1,7 @@
 #include "render.h"
 
+#include "raytracer.h"
+
 const VkFormat MATERIAL_INDEX_IMAGE_FORMAT = VK_FORMAT_R8_UINT;
 const VkFormat MATERIAL_INDEX_VERTEX_FORMAT = VK_FORMAT_R32_UINT;
 
@@ -793,7 +795,7 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
 
     // Create descriptor set layout
     {
-        VkDescriptorSetLayoutBinding samplerLayoutBindings[3] = {};
+        VkDescriptorSetLayoutBinding samplerLayoutBindings[5] = {};
 
         samplerLayoutBindings[0].binding = 0;
         samplerLayoutBindings[0].descriptorCount = 1;
@@ -809,9 +811,21 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
 
         samplerLayoutBindings[2].binding = 2;
         samplerLayoutBindings[2].descriptorCount = 1;
-        samplerLayoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        samplerLayoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         samplerLayoutBindings[2].pImmutableSamplers = nullptr;
         samplerLayoutBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        samplerLayoutBindings[3].binding = 3;
+        samplerLayoutBindings[3].descriptorCount = 1;
+        samplerLayoutBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        samplerLayoutBindings[3].pImmutableSamplers = nullptr;
+        samplerLayoutBindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        samplerLayoutBindings[4].binding = 4;
+        samplerLayoutBindings[4].descriptorCount = 1;
+        samplerLayoutBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        samplerLayoutBindings[4].pImmutableSamplers = nullptr;
+        samplerLayoutBindings[4].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
         layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -829,7 +843,7 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
     {
         VkDescriptorPoolSize poolSizes[2] = {};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount = 2;
+        poolSizes[0].descriptorCount = 4;
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[1].descriptorCount = 1;
 
@@ -858,8 +872,8 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
             return false;
         }
 
-        VkWriteDescriptorSet descriptorWrites[3] = {};
-        VkDescriptorImageInfo imageInfos[2] = {};
+        VkWriteDescriptorSet descriptorWrites[5] = {};
+        VkDescriptorImageInfo imageInfos[4] = {};
         VkDescriptorBufferInfo bufferInfo = {};
 
         imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -886,17 +900,41 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
         descriptorWrites[1].descriptorCount = 1;
         descriptorWrites[1].pImageInfo = &imageInfos[1];
 
-        bufferInfo.buffer = compositePipeline->uniformBuffer.buffer;
-        bufferInfo.offset = 0;
-        bufferInfo.range = sizeof(CompositeUniformBufferObject);
+        imageInfos[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[2].imageView = compositePipeline->triangleGeometry.view;
+        imageInfos[2].sampler = compositePipeline->sampler;
 
         descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         descriptorWrites[2].dstSet = compositePipeline->descriptorSet;
         descriptorWrites[2].dstBinding = 2;
         descriptorWrites[2].dstArrayElement = 0;
-        descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         descriptorWrites[2].descriptorCount = 1;
-        descriptorWrites[2].pBufferInfo = &bufferInfo;
+        descriptorWrites[2].pImageInfo = &imageInfos[2];
+
+        imageInfos[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[3].imageView = compositePipeline->triangleMaterialInds.view;
+        imageInfos[3].sampler = compositePipeline->sampler;
+
+        descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[3].dstSet = compositePipeline->descriptorSet;
+        descriptorWrites[3].dstBinding = 3;
+        descriptorWrites[3].dstArrayElement = 0;
+        descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrites[3].descriptorCount = 1;
+        descriptorWrites[3].pImageInfo = &imageInfos[3];
+
+        bufferInfo.buffer = compositePipeline->uniformBuffer.buffer;
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(CompositeUniformBufferObject);
+
+        descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[4].dstSet = compositePipeline->descriptorSet;
+        descriptorWrites[4].dstBinding = 4;
+        descriptorWrites[4].dstArrayElement = 0;
+        descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrites[4].descriptorCount = 1;
+        descriptorWrites[4].pBufferInfo = &bufferInfo;
 
         vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
     }
@@ -1095,8 +1133,8 @@ void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* 
     DestroyVulkanImage(device, &compositePipeline->raytracedImage);
 }
 
-bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
-                                 VulkanCompositePipeline* compositePipeline)
+bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, const LoadObjResult& obj,
+                                 LinearAllocator* allocator, VulkanCompositePipeline* compositePipeline)
 {
     UNREFERENCED_PARAMETER(allocator);
 
@@ -1186,11 +1224,179 @@ bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool comma
         }
     }
 
+    RaycastGeometry geometry = CreateRaycastGeometry(obj, UINT32_MAX_VALUE, allocator, allocator);
+    if (geometry.meshes.data == nullptr) {
+        LOG_ERROR("Failed to create raycast geometry\n");
+        return false;
+    }
+
+    // Validate loaded geometry
+    {
+        const uint32 geometryAtlasSize = VulkanCompositePipeline::TRIANGLE_GEOMETRY_ATLAS_SIZE;
+        const uint32 MAX_TRIANGLES = geometryAtlasSize * geometryAtlasSize / 4;
+
+        uint32 numTriangles = 0;
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            const RaycastMesh& mesh = geometry.meshes[i];
+            if (mesh.numTriangles != mesh.bvh.triangles.size) {
+                LOG_ERROR("Some BVH constructed, but expected flat structure\n");
+                return false;
+            }
+
+            numTriangles++;
+            if (numTriangles >= MAX_TRIANGLES) {
+                LOG_ERROR("Too many triangles, reached max %lu\n", MAX_TRIANGLES);
+                return false;
+            }
+        }
+    }
+
+    // Create triangle geometry image
+    {
+        const uint32 atlasSize = VulkanCompositePipeline::TRIANGLE_GEOMETRY_ATLAS_SIZE;
+
+        if (!CreateImage(window.device, window.physicalDevice, atlasSize, atlasSize,
+                         VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &compositePipeline->triangleGeometry.image, &compositePipeline->triangleGeometry.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, compositePipeline->triangleGeometry.image, VK_FORMAT_R32G32B32A32_SFLOAT,
+                             VK_IMAGE_ASPECT_COLOR_BIT, &compositePipeline->triangleGeometry.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+
+        const VkDeviceSize totalAtlasSize = atlasSize * atlasSize * 4 * sizeof(float32);
+        VulkanBuffer stagingBuffer;
+        if (!CreateVulkanBuffer(totalAtlasSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &stagingBuffer)) {
+            LOG_ERROR("CreateVulkanBuffer failed\n");
+            return false;
+        }
+        defer(DestroyVulkanBuffer(window.device, &stagingBuffer));
+
+        void* data;
+        vkMapMemory(window.device, stagingBuffer.memory, 0, totalAtlasSize, 0, &data);
+
+        struct TriangleData
+        {
+            Vec4 normal;
+            Vec4 a, b, c;
+        };
+
+        static_assert(totalAtlasSize % sizeof(TriangleData) == 0);
+
+        uint32 numTriangles = 0;
+        TriangleData* triangleData = (TriangleData*)data;
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            const RaycastMesh& mesh = geometry.meshes[i];
+            for (uint32 j = 0; j < mesh.bvh.triangles.size; j++) {
+                const RaycastTriangle& triangle = mesh.bvh.triangles[j];
+                TriangleData* t = &triangleData[numTriangles++];
+                t->a = ToVec4(triangle.pos[0], 0.0f);
+                t->b = ToVec4(triangle.pos[1], 0.0f);
+                t->c = ToVec4(triangle.pos[2], 0.0f);
+                t->normal = ToVec4(triangle.normal, 0.0f);
+            }
+        }
+
+        vkUnmapMemory(window.device, stagingBuffer.memory);
+
+        {
+            SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+
+            TransitionImageLayout(commandBuffer, compositePipeline->triangleGeometry.image,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+            CopyBufferToImage(commandBuffer, stagingBuffer.buffer, compositePipeline->triangleGeometry.image,
+                              atlasSize, atlasSize);
+
+            TransitionImageLayout(commandBuffer, compositePipeline->triangleGeometry.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    // Create triangle material indices image
+    {
+        const uint32 atlasSize = VulkanCompositePipeline::TRIANGLE_MATERIALS_ATLAS_SIZE;
+
+        if (!CreateImage(window.device, window.physicalDevice,
+                         atlasSize, atlasSize,
+                         VK_FORMAT_R8_UINT, VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &compositePipeline->triangleMaterialInds.image,
+                         &compositePipeline->triangleMaterialInds.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, compositePipeline->triangleMaterialInds.image, VK_FORMAT_R8_UINT,
+                             VK_IMAGE_ASPECT_COLOR_BIT, &compositePipeline->triangleMaterialInds.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+
+        const VkDeviceSize totalAtlasSize = atlasSize * atlasSize * sizeof(uint8);
+        VulkanBuffer stagingBuffer;
+        if (!CreateVulkanBuffer(totalAtlasSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &stagingBuffer)) {
+            LOG_ERROR("CreateVulkanBuffer failed\n");
+            return false;
+        }
+        defer(DestroyVulkanBuffer(window.device, &stagingBuffer));
+
+        void* data;
+        vkMapMemory(window.device, stagingBuffer.memory, 0, totalAtlasSize, 0, &data);
+
+        uint32 numTriangles = 0;
+        uint8* materialInds = (uint8*)data;
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            const RaycastMesh& mesh = geometry.meshes[i];
+            for (uint32 j = 0; j < mesh.bvh.triangles.size; j++) {
+                const uint32 materialIndex = mesh.bvh.triangles[j].materialIndex;
+                if (materialIndex > UINT8_MAX_VALUE) {
+                    LOG_ERROR("Material index %lu over max %lu\n", materialIndex, UINT8_MAX_VALUE);
+                    return false;
+                }
+                materialInds[numTriangles++] = (uint8)materialIndex;
+            }
+        }
+
+        vkUnmapMemory(window.device, stagingBuffer.memory);
+
+        {
+            SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+
+            TransitionImageLayout(commandBuffer, compositePipeline->triangleMaterialInds.image,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+            CopyBufferToImage(commandBuffer, stagingBuffer.buffer, compositePipeline->triangleMaterialInds.image,
+                              atlasSize, atlasSize);
+
+            TransitionImageLayout(commandBuffer, compositePipeline->triangleMaterialInds.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
     return true;
 }
 
 void UnloadCompositePipelineWindow(VkDevice device, VulkanCompositePipeline* compositePipeline)
 {
+    DestroyVulkanImage(device, &compositePipeline->triangleMaterialInds);
+    DestroyVulkanImage(device, &compositePipeline->triangleGeometry);
+
     vkDestroySampler(device, compositePipeline->sampler, nullptr);
     DestroyVulkanBuffer(device, &compositePipeline->vertexBuffer);
 }

@@ -42,11 +42,17 @@ struct MeshUniformBufferObject
 
 struct VulkanCompositePipeline
 {
+    const static uint32 TRIANGLE_GEOMETRY_ATLAS_SIZE = 2048;
+    const static uint32 TRIANGLE_MATERIALS_ATLAS_SIZE = TRIANGLE_GEOMETRY_ATLAS_SIZE / 4;
+
     VulkanBuffer vertexBuffer;
     VulkanBuffer uniformBuffer;
 
     VulkanImage raytracedImage;
     VkSampler sampler;
+
+    VulkanImage triangleGeometry;
+    VulkanImage triangleMaterialInds;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -64,21 +70,10 @@ struct CompositeMaterial
     float32 emission;
 };
 
-struct CompositeTriangle
-{
-    alignas(16) Vec3 a;
-    alignas(16) Vec3 b;
-    alignas(16) Vec3 c;
-    alignas(16) Vec3 normal;
-    uint32 materialIndex;
-};
-
 struct CompositeUniformBufferObject
 {
-    const static uint32 MAX_TRIANGLES = 512;
     const static uint32 MAX_MATERIALS = 8;
 
-    alignas(16) CompositeTriangle triangles[MAX_TRIANGLES];
     alignas(16) CompositeMaterial materials[MAX_MATERIALS];
     alignas(16) Vec3 filmTopLeft;
     alignas(16) Vec3 filmUnitOffsetX;
@@ -100,6 +95,6 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
                                     VulkanCompositePipeline* compositePipeline);
 void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* compositePipeline);
 
-bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
-                                 VulkanCompositePipeline* compositePipeline);
+bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, const LoadObjResult& obj,
+                                 LinearAllocator* allocator, VulkanCompositePipeline* compositePipeline);
 void UnloadCompositePipelineWindow(VkDevice device, VulkanCompositePipeline* compositePipeline);

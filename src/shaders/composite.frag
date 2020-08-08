@@ -1,11 +1,5 @@
 #version 450
 
-struct Triangle {
-	vec3 a, b, c;
-	vec3 normal;
-	uint materialIndex;
-};
-
 struct Material {
 	vec3 albedo;
 	vec3 emissionColor;
@@ -20,8 +14,10 @@ layout(location = 0) out vec4 outColor;
 layout(binding = 0) uniform sampler2D rasterizedColor;
 layout(binding = 1) uniform sampler2D raytracedColor;
 
-layout(binding = 2) uniform UniformBufferObject {
-	Triangle triangles[512];
+layout(binding = 2) uniform sampler2D triangleGeometry;
+layout(binding = 3) uniform isampler2D triangleMaterials;
+
+layout(binding = 4) uniform UniformBufferObject {
 	Material materials[8];
 	vec3 filmTopLeft;
 	vec3 filmUnitOffsetX;
@@ -32,9 +28,12 @@ layout(binding = 2) uniform UniformBufferObject {
 
 vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 {
+	uint triangleGeometryAtlasSize = 2048;
+	uint triangleMaterialsAtlasSize = triangleGeometryAtlasSize / 4;
+
 	float EPSILON = 0.000001;
 	uint bounces = 4;
-	float minDist = 0.0;
+	float minDist = 0.1;
 	float maxDist = 20.0;
 
 	float intensity = 1.0;
@@ -45,15 +44,21 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 		float hitDist = maxDist;
 
 		for (uint j = 0; j < ubo.numTriangles; j++) {
-			vec3 triangleNormal = ubo.triangles[j].normal;
+			uint ind = j * 4;
+			ivec2 baseInd = ivec2(ind % triangleGeometryAtlasSize, ind / triangleGeometryAtlasSize);
+			vec3 triangleNormal = texelFetch(triangleGeometry, baseInd, 0).xyz;
 			float dotNegRayNormal = dot(rayDir, triangleNormal);
 			if (dotNegRayNormal > 0.0) {
 				//continue;
 			}
 
+			vec3 a = texelFetch(triangleGeometry, baseInd + ivec2(1, 0), 0).xyz;
+			vec3 b = texelFetch(triangleGeometry, baseInd + ivec2(2, 0), 0).xyz;
+			vec3 c = texelFetch(triangleGeometry, baseInd + ivec2(3, 0), 0).xyz;
+
 			// ray-triangle intersection
-			vec3 ab = ubo.triangles[j].b - ubo.triangles[j].a;
-			vec3 ac = ubo.triangles[j].c - ubo.triangles[j].a;
+			vec3 ab = b - a;
+			vec3 ac = c - a;
 			vec3 h = cross(rayDir, ac);
 			float x = dot(ab, h);
 			if (x > -EPSILON && x < EPSILON) {
@@ -61,7 +66,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 			}
 
 			float f = 1.0 / x;
-			vec3 s = rayOrigin - ubo.triangles[j].a;
+			vec3 s = rayOrigin - a;
 			float u = f * dot(s, h);
 			if (u < 0.0 || u > 1.0) {
 				continue;
@@ -76,7 +81,8 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 			//return vec3(1.0, 1.0, 1.0);
 			float t = f * dot(ac, q);
 			if (t > minDist && t < hitDist) {
-				hitMaterialIndex = ubo.triangles[j].materialIndex;
+				ivec2 materialTexelInd = ivec2(j % triangleMaterialsAtlasSize, j / triangleMaterialsAtlasSize);
+				hitMaterialIndex = texelFetch(triangleMaterials, materialTexelInd, 0).x;
 				hitNormal = triangleNormal;
 				hitDist = t;
 			}
