@@ -46,6 +46,28 @@ struct VulkanAppState
     VulkanMeshPipeline meshPipeline;
     VulkanCompositePipeline compositePipeline;
 
+    // compute ----------------------------------------------
+    VkQueue computeQueue;
+    VkCommandPool computeCommandPool;
+
+    VulkanImage computeImage;
+    VkSampler computeSampler;
+
+    uint32 numTriangles;
+    VulkanBuffer computeTriangles;
+    VulkanBuffer computeUniform;
+
+    VkDescriptorSetLayout computeDescriptorSetLayout;
+    VkDescriptorPool computeDescriptorPool;
+    VkDescriptorSet computeDescriptorSet;
+
+    VkPipelineLayout computePipelineLayout;
+    VkPipeline computePipeline;
+
+    VkCommandBuffer computeCommandBuffer;
+    VkFence computeFence;
+    // ------------------------------------------------------
+
     VulkanSpritePipeline<(uint32)SpriteId::COUNT> spritePipeline;
     VulkanTextPipeline<(uint32)FontId::COUNT> textPipeline;
 };

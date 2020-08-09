@@ -73,7 +73,7 @@ def post_compile_custom(paths):
     glslc_path = WIN32_VULKAN_PATH + "\\Bin\\glslc.exe"
     shader_path = "build/data/shaders"
     for file in os.listdir(shader_path):
-        if len(file) >= 5 and (file[-5:] == ".vert" or file[-5:] == ".frag"):
+        if len(file) >= 5 and (file[-5:] == ".vert" or file[-5:] == ".frag" or file[-5:] == ".comp"):
             shader_file_path = shader_path + "/" + file
             output_file_path = shader_path + "/" + file + ".spv"
             subprocess.call(glslc_path + " " + shader_file_path + " -o " + output_file_path, shell=True)

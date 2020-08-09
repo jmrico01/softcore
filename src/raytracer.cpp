@@ -44,50 +44,6 @@ float32 RandomBilateral(RandomSeries* series)
     return 2.0f * RandomUnilateral(series) - 1.0f;
 }
 
-struct DebugTimer
-{
-    static bool initialized;
-    static uint64 win32Freq;
-
-    uint64 cycles;
-    uint64 win32Time;
-};
-
-bool DebugTimer::initialized = false;
-uint64 DebugTimer::win32Freq;
-
-DebugTimer StartDebugTimer()
-{
-    if (!DebugTimer::initialized) {
-        DebugTimer::initialized = true;
-        LARGE_INTEGER freq;
-        QueryPerformanceFrequency(&freq);
-        DebugTimer::win32Freq = freq.QuadPart;
-    }
-
-    DebugTimer timer;
-    LARGE_INTEGER win32Time;
-    QueryPerformanceCounter(&win32Time);
-    timer.win32Time = win32Time.QuadPart;
-    timer.cycles = __rdtsc();
-    return timer;
-}
-
-void StopDebugTimer(DebugTimer* timer)
-{
-    LARGE_INTEGER win32End;
-    QueryPerformanceCounter(&win32End);
-    timer->cycles = __rdtsc() - timer->cycles;
-    timer->win32Time = win32End.QuadPart - timer->win32Time;
-}
-
-void StopAndPrintDebugTimer(DebugTimer* timer)
-{
-    StopDebugTimer(timer);
-    const float32 win32Time = (float32)timer->win32Time / DebugTimer::win32Freq * 1000.0f;
-    LOG_INFO("Timer: %.03fms | %llu MC\n", win32Time, timer->cycles / 1000000);
-}
-
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
     if (StringEquals(name, ToString("Surfaces"))) {
@@ -127,10 +83,18 @@ bool GetMaterial(const_string name, RaycastMaterial* material)
     return true;
 }
 
-bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles, bool firstPass, 
-                        Array<RaycastTriangle> triangles, LinearAllocator* allocator, LinearAllocator* tempAllocator)
+bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 bvhMaxTriangles, bool firstPass,
+                        uint32 depth, uint32* maxDepth, Array<RaycastTriangle> triangles,
+                        LinearAllocator* allocator, LinearAllocator* tempAllocator)
 {
     DEBUG_ASSERT(bvh != nullptr);
+
+    if (firstPass) {
+        *maxDepth = 0;
+    }
+    else if (depth > *maxDepth) {
+        *maxDepth = depth;
+    }
 
     DynamicArray<RaycastTriangle, LinearAllocator> insideTriangles(tempAllocator);
 
@@ -161,7 +125,7 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles,
 
     // TODO examine the second case. # of triangles should decrease reasonably each partition,
     // otherwise we're duplicating checks
-    if (insideTriangles.size <= boxMaxTriangles || (!firstPass && insideTriangles.size == triangles.size)) {
+    if (insideTriangles.size <= bvhMaxTriangles || (!firstPass && insideTriangles.size == triangles.size)) {
         bvh->child1 = nullptr;
         bvh->child2 = nullptr;
         bvh->triangles = allocator->NewArray<RaycastTriangle>(insideTriangles.size);
@@ -185,8 +149,8 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles,
         if (bvh->child1 == nullptr) {
             return false;
         }
-        if (!FillRaycastMeshBvh(bvh->child1, minBox1, boxMaxTriangles, false, insideTriangles.ToArray(),
-                                allocator, tempAllocator)) {
+        if (!FillRaycastMeshBvh(bvh->child1, minBox1, bvhMaxTriangles, false, depth + 1, maxDepth,
+                                insideTriangles.ToArray(), allocator, tempAllocator)) {
             return false;
         }
 
@@ -194,8 +158,8 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles,
         if (bvh->child2 == nullptr) {
             return false;
         }
-        if (!FillRaycastMeshBvh(bvh->child2, minBox2, boxMaxTriangles, false, insideTriangles.ToArray(),
-                                allocator, tempAllocator)) {
+        if (!FillRaycastMeshBvh(bvh->child2, minBox2, bvhMaxTriangles, false, depth + 1, maxDepth,
+                                insideTriangles.ToArray(), allocator, tempAllocator)) {
             return false;
         }
     }
@@ -203,7 +167,7 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 boxMaxTriangles,
     return true;
 }
 
-RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTriangles,
+RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
                                       LinearAllocator* allocator, LinearAllocator* tempAllocator)
 {
     RaycastGeometry geometry = {};
@@ -226,8 +190,15 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
         return geometry;
     }
 
+    uint32 totalTriangles = 0;
+    uint32 totalBvhs = 0;
     uint32 maxBvhTrianglesInd = obj.models.size;
     uint32 maxBvhTriangles = 0;
+    uint32 totalBvhTriangles = 0;
+    uint32 maxBvhDepthInd = obj.models.size;
+    uint32 maxBvhDepth = 0;
+    uint32 maxBvhNodesInd = obj.models.size;
+    uint32 maxBvhNodes = 0;
 
     for (uint32 i = 0; i < obj.models.size; i++) {
         const_string name = obj.models[i].name;
@@ -235,6 +206,7 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
 
         const uint32 numTriangles = obj.models[i].triangles.size + obj.models[i].quads.size * 2;
         mesh.numTriangles = numTriangles;
+        totalTriangles += numTriangles;
 
         Array<RaycastTriangle> triangles = tempAllocator->NewArray<RaycastTriangle>(numTriangles);
         if (triangles.data == nullptr) {
@@ -273,12 +245,20 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
         }
 
         const Box veryBigBox = { .min = -Vec3::one * 1e8, .max = Vec3::one * 1e8 };
-        if (!FillRaycastMeshBvh(&mesh.bvh, veryBigBox, boxMaxTriangles, true, triangles, allocator, tempAllocator)) {
+        uint32 maxDepth;
+        if (!FillRaycastMeshBvh(&mesh.bvh, veryBigBox, bvhMaxTriangles, true, 0, &maxDepth,
+                                triangles, allocator, tempAllocator)) {
             LOG_ERROR("Failed to fill raycast mesh box for mesh %.*s\n", name.size, name.data);
             geometry.meshes.data = nullptr;
             return geometry;
         }
 
+        if (maxDepth > maxBvhDepth) {
+            maxBvhDepthInd = i;
+            maxBvhDepth = maxDepth;
+        }
+
+        uint32 numBvhNodes = 0;
         DynamicArray<RaycastMeshBvh*, LinearAllocator> bvhStack(tempAllocator);
         bvhStack.Append(&mesh.bvh);
         while (bvhStack.size > 0) {
@@ -286,6 +266,8 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
             bvhStack.RemoveLast();
 
             if (bvh->child1 == nullptr) {
+                numBvhNodes++;
+                totalBvhTriangles += bvh->triangles.size;
                 if (bvh->triangles.size > maxBvhTriangles) {
                     maxBvhTrianglesInd = i;
                     maxBvhTriangles = bvh->triangles.size;
@@ -296,12 +278,38 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTri
                 bvhStack.Append(bvh->child2);
             }
         }
+
+        totalBvhs += numBvhNodes;
+        if (numBvhNodes > maxBvhNodes) {
+            maxBvhNodesInd = i;
+            maxBvhNodes = numBvhNodes;
+        }
     }
 
-    DEBUG_ASSERT(maxBvhTrianglesInd != obj.models.size);
-    const_string maxBvhTrianglesName = obj.models[maxBvhTrianglesInd].name;
-    LOG_INFO("Mesh %.*s has max BVH triangles: %lu\n",
-             maxBvhTrianglesName.size, maxBvhTrianglesName.data, maxBvhTriangles);
+    // Report BVH stats
+    if (bvhMaxTriangles != UINT32_MAX_VALUE) {
+        LOG_INFO("Total BVHs: %lu\n", totalBvhs);
+        LOG_INFO("BVH triangles / total triangles: %lu / %lu (%.02f %%)\n", totalBvhTriangles, totalTriangles,
+                 (float32)totalBvhTriangles / (float32)totalTriangles * 100.0f);
+
+        LOG_INFO("Avg BVH triangles: %.02f\n", (float32)totalBvhTriangles / (float32)totalBvhs);
+        DEBUG_ASSERT(maxBvhTrianglesInd != obj.models.size);
+        const_string maxBvhTrianglesName = obj.models[maxBvhTrianglesInd].name;
+        LOG_INFO("Max BVH triangles: %lu (mesh %.*s)\n",
+                 maxBvhTriangles, maxBvhTrianglesName.size, maxBvhTrianglesName.data);
+
+        LOG_INFO("Avg BVH nodes: %.02f\n", (float32)totalBvhs / (float32)obj.models.size);
+        if (maxBvhNodesInd != obj.models.size) {
+            const_string maxBvhNodesName = obj.models[maxBvhNodesInd].name;
+            LOG_INFO("Max BVH nodes: %lu (mesh %.*s)\n",
+                     maxBvhNodes, maxBvhNodesName.size, maxBvhNodesName.data);
+        }
+        if (maxBvhDepthInd != obj.models.size) {
+            const_string maxBvhDepthName = obj.models[maxBvhDepthInd].name;
+            LOG_INFO("Max BVH depth: %lu (mesh %.*s)\n",
+                     maxBvhDepth, maxBvhDepthName.size, maxBvhDepthName.data);
+        }
+    }
 
     return geometry;
 }
@@ -320,8 +328,7 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTri
 
         float32 t;
         const bool tIntersect = RayTriangleIntersection(rayOrigin, rayDir,
-                                                        triangle.pos[0], triangle.pos[1], triangle.pos[2],
-                                                        &t);
+                                                        triangle.pos[0], triangle.pos[1], triangle.pos[2], &t);
         UNREFERENCED_PARAMETER(minDist);
         if (tIntersect && t > minDist && t < *hitDist) {
             *hitMaterialIndex = triangle.materialIndex;
@@ -421,42 +428,54 @@ struct RaycastThreadWorkCommon
     Vec3 filmUnitOffsetX;
     Vec3 filmUnitOffsetY;
     Vec3 cameraPos;
+    uint32 width, height;
     uint32 bounces;
+    float32 fill;
     float32 minDist;
     float32 maxDist;
 };
 
-struct RaycastThreadWorkState
-{
-    Array<RandomSeries> threadRandomSeries;
-};
-
 struct RaycastThreadWork
 {
-    static const uint32 PIXELS_PER_WORK_UNIT = 64;
-
     const RaycastThreadWorkCommon* common;
-    RaycastThreadWorkState* state;
-    Vec2Int pixels[PIXELS_PER_WORK_UNIT];
-    Vec3 outputColors[PIXELS_PER_WORK_UNIT];
+    Vec3* colorHdr;
+    RandomSeries randomSeries;
+    uint32 minX, maxX, minY, maxY;
 };
 
 APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 {
+    UNREFERENCED_PARAMETER(threadIndex);
     UNREFERENCED_PARAMETER(queue);
+    ZoneScoped;
 
     // TODO have some guarantee that this stack will be big enough
     const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE];
 
     RaycastThreadWork* work = (RaycastThreadWork*)data;
-    for (uint32 i = 0; i < work->PIXELS_PER_WORK_UNIT; i++) {
-        const Vec3 filmOffsetX = work->common->filmUnitOffsetX * (float32)work->pixels[i].x;
-        const Vec3 filmOffsetY = work->common->filmUnitOffsetY * (float32)work->pixels[i].y;
-        const Vec3 filmPos = work->common->filmTopLeft + filmOffsetX + filmOffsetY;
-        const Vec3 rayDir = Normalize(filmPos - work->common->cameraPos);
-        work->outputColors[i] = RaycastColor(work->common->cameraPos, rayDir, work->common->bounces,
-                                             work->common->minDist, work->common->maxDist, bvhStack,
-                                             *(work->common->geometry), &work->state->threadRandomSeries[threadIndex]);
+    const RaycastThreadWorkCommon& common = *work->common;
+    RandomSeries randomSeries = work->randomSeries;
+    const uint32 minX = work->minX;
+    const uint32 maxX = work->maxX;
+    const uint32 minY = work->minY;
+    const uint32 maxY = work->maxY;
+
+    for (uint32 y = minY; y < maxY; y++) {
+        for (uint32 x = minX; x < maxX; x++) {
+            if (RandomUnilateral(&randomSeries) < common.fill) {
+                const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
+                const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
+                const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
+                const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
+
+                const Vec3 raycastColor = RaycastColor(common.cameraPos, rayDir, common.bounces,
+                                                       common.minDist, common.maxDist,
+                                                       bvhStack, *common.geometry, &randomSeries);
+
+                const uint32 pixelIndex = y * common.width + x;
+                work->colorHdr[pixelIndex] = raycastColor;
+            }
+        }
     }
 }
 
@@ -500,17 +519,20 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     const float32 filmWidth = filmHeight * (float32)width / (float32)height;
 
     const Vec3 filmTopLeft = cameraPos + cameraForward * filmDist
-        + (filmWidth / 2.0f + canvas->test2) * cameraUp + (filmHeight / 2.0f + canvas->test3) * cameraLeft;
+        + (filmWidth / 2.0f) * cameraLeft + (filmHeight / 2.0f) * cameraUp;
     const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)(width - 1);
     const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)(height - 1);
 
-    const RaycastThreadWorkCommon workCommon = {
+    RaycastThreadWorkCommon workCommon = {
         .geometry = &geometry,
         .filmTopLeft = filmTopLeft,
         .filmUnitOffsetX = filmUnitOffsetX,
         .filmUnitOffsetY = filmUnitOffsetY,
         .cameraPos = cameraPos,
+        .width = width,
+        .height = height,
         .bounces = canvas->bounces,
+        .fill = canvas->screenFill,
         .minDist = 0.0f,
         .maxDist = 20.0f,
     };
@@ -518,47 +540,30 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     RandomSeries series;
     const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
     series.state = seed;
-    // series.state = (uint32)rand();
+    series.state = (uint32)rand();
 
-    const uint32 numThreads = GetCpuCount();
-    RaycastThreadWorkState workState = {};
-    workState.threadRandomSeries = allocator->NewArray<RandomSeries>(numThreads);
-    for (uint32 i = 0; i < workState.threadRandomSeries.size; i++) {
-        // TODO these don't guarantee same results, because threads will pick work entries in undefined order
-        // Need a more specific, dedicated thread pool system for this task
-        workState.threadRandomSeries[i].state = RandomUInt32(&series);
-    }
+    const uint32 WORK_TILE_SIZE = 16;
+    const uint32 wholeTilesX = width / WORK_TILE_SIZE;
+    const uint32 wholeTilesY = height / WORK_TILE_SIZE;
+    const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
+    Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
 
-    const uint32 screenFillPixels = (uint32)((float32)numPixels * canvas->screenFill);
-    const uint32 maxRays = RoundUpToPowerOfTwo(screenFillPixels, RaycastThreadWork::PIXELS_PER_WORK_UNIT);
-    const uint32 maxWorkEntries = maxRays / RaycastThreadWork::PIXELS_PER_WORK_UNIT;
-    uint32 numWorkEntries = 0;
-    uint32 numWorkEntryPixels = 0;
-    RaycastThreadWork* workEntries = allocator->New<RaycastThreadWork>(maxWorkEntries);
-    workEntries[0].common = &workCommon;
-    workEntries[0].state = &workState;
+    for (uint32 tileY = 0; tileY < wholeTilesY; tileY++) {
+        for (uint32 tileX = 0; tileX < wholeTilesX; tileX++) {
+            const uint32 workIndex = tileY * wholeTilesX + tileX;
+            RaycastThreadWork* work = &workEntries[workIndex];
+            work->common = &workCommon;
+            work->colorHdr = canvas->colorHdr.data,
+            work->randomSeries.state = RandomUInt32(&series);
+            work->minX = tileX * WORK_TILE_SIZE;
+            work->maxX = (tileX + 1) * WORK_TILE_SIZE;
+            work->minY = tileY * WORK_TILE_SIZE;
+            work->maxY = (tileY + 1) * WORK_TILE_SIZE;
 
-    for (uint32 i = 0; i < numPixels; i++) {
-        if (RandomUnilateral(&series) < canvas->screenFill) {
-            workEntries[numWorkEntries].pixels[numWorkEntryPixels].x = i % width;
-            workEntries[numWorkEntries].pixels[numWorkEntryPixels].y = i / width;
-
-            numWorkEntryPixels++;
-            if (numWorkEntryPixels >= RaycastThreadWork::PIXELS_PER_WORK_UNIT) {
-                if (!TryAddWork(queue, &RaycastThreadProc, &workEntries[numWorkEntries])) {
-                    CompleteAllWork(queue, 0);
-                    numWorkEntryPixels--;
-                    i--;
-                    continue;
-                }
-
-                numWorkEntries++;
-                if (numWorkEntries >= maxWorkEntries) {
-                    break;
-                }
-                workEntries[numWorkEntries].common = &workCommon;
-                workEntries[numWorkEntries].state = &workState;
-                numWorkEntryPixels = 0;
+            if (!TryAddWork(queue, &RaycastThreadProc, work)) {
+                CompleteAllWork(queue, 0);
+                tileX--;
+                continue;
             }
         }
     }
@@ -569,22 +574,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         ZoneScopedN("FinishWork");
         CompleteAllWork(queue, 0);
     }
-
-    TracyCZoneN(zoneBlend, "Blend", true);
-
-    const float32 prevWeight = 0.0f;
-    for (uint32 i = 0; i < numWorkEntries; i++) {
-        for (uint32 j = 0; j < RaycastThreadWork::PIXELS_PER_WORK_UNIT; j++) {
-            const Vec2Int pixel = workEntries[i].pixels[j];
-            const Vec3 color = workEntries[i].outputColors[j];
-
-            const uint32 index = pixel.y * width + pixel.x;
-            const Vec3 prevColor = canvas->colorHdr[index];
-            canvas->colorHdr[index] = Lerp(color, prevColor + color, prevWeight);
-        }
-    }
-
-    TracyCZoneEnd(zoneBlend);
 
     TracyCZoneN(zoneHdrTranslate, "TranslateHdr", true);
 

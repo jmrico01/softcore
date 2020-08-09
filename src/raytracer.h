@@ -4,6 +4,8 @@
 #include <km_common/km_memory.h>
 #include <km_common/app/km_app.h>
 
+const uint32 BOX_MAX_TRIANGLES = 32;
+
 struct RaycastMaterial
 {
     float32 smoothness;
