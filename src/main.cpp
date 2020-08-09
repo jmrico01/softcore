@@ -41,7 +41,7 @@ struct ComputeUbo
 	alignas(16) Vec3 filmTopLeft;
 	alignas(16) Vec3 filmUnitOffsetX;
 	alignas(16) Vec3 filmUnitOffsetY;
-	ComputeMaterial materials[MAX_MATERIALS];
+	alignas(16) ComputeMaterial materials[MAX_MATERIALS];
 };
 
 struct StartSceneInfo
@@ -79,7 +79,7 @@ const StartSceneInfo START_SCENE_INFOS[] = {
     },
 };
 
-const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[4];
+const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[0];
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
@@ -1297,7 +1297,8 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             vkCmdBindDescriptorSets(app->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                     app->computePipelineLayout, 0, 1, &app->computeDescriptorSet, 0, 0);
 
-            vkCmdDispatch(app->computeCommandBuffer, imageWidth / 16, imageHeight / 16, 1);
+            const uint32 batchSize = VulkanAppState::BATCH_SIZE;
+            vkCmdDispatch(app->computeCommandBuffer, imageWidth / batchSize, imageHeight / batchSize, 1);
 
             if (vkEndCommandBuffer(app->computeCommandBuffer) != VK_SUCCESS) {
                 LOG_ERROR("vkEndCommandBuffer failed\n");

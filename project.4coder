@@ -4,7 +4,7 @@ project_name = "softcore";
 
 patterns = {
 "*.cpp", "*.c", "*.h",
-"*.vert", "*.frag",
+"*.vert", "*.frag", "*.comp",
 "*.kmkv",
 "*.bat", "*.sh", "*.py",
 "*.4coder",

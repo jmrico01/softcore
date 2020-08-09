@@ -1,11 +1,14 @@
 #version 450
 
+#define TILE_SIZE 16
 #define MAX_MATERIALS 32
 
 #define EPSILON 0.000001
 #define BOUNCES 4
 #define MIN_DIST 0.01
 #define MAX_DIST 20.0
+
+#define QUAT_ONE vec4(0.0, 0.0, 0.0, 1.0)
 
 struct Material
 {
@@ -22,7 +25,7 @@ struct Triangle
 	uint materialIndex;
 };
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE) in;
 
 layout(binding = 0, rgba8) uniform writeonly image2D resultImage;
 layout(binding = 1) uniform UBO
@@ -38,8 +41,90 @@ layout(std140, binding = 2) buffer Triangles
 	Triangle triangles[];
 };
 
-vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
+const uint UINT32_MAX_VALUE = 0xffffffff;
+
+// Reference https://en.wikipedia.org/wiki/Xorshift
+uint XOrShift32(uint value)
 {
+	value ^= value << 13;
+	value ^= value >> 17;
+	value ^= value << 5;
+	return value;
+}
+
+uint RandomUInt(inout uint state)
+{
+	state = XOrShift32(state);
+	return state;
+}
+
+float RandomUnilateral(inout uint state)
+{
+	return float(RandomUInt(state)) / float(UINT32_MAX_VALUE);
+}
+
+float RandomBilateral(inout uint state)
+{
+	return 2.0 * RandomUnilateral(state) - 1.0;
+}
+
+vec4 QuatMultiply(vec4 q1, vec4 q2)
+{
+    vec4 result;
+    result.x = q1.w*q2.x + q1.x*q2.w + q1.y*q2.z - q1.z*q2.y;
+    result.y = q1.w*q2.y + q1.y*q2.w + q1.z*q2.x - q1.x*q2.z;
+    result.z = q1.w*q2.z + q1.z*q2.w + q1.x*q2.y - q1.y*q2.x;
+    result.w = q1.w*q2.w - q1.x*q2.x - q1.y*q2.y - q1.z*q2.z;
+    return result;
+}
+
+vec4 QuatInverse(vec4 q)
+{
+	return vec4(-q.x, -q.y, -q.z, q.w);
+}
+
+vec3 QuatRotate(vec3 v, vec4 quat)
+{
+	// TODO Quat multiply with baked w=0
+	vec4 vQuat = vec4(v, 0.0);
+
+	vec4 qv = QuatMultiply(quat, vQuat);
+	vec4 qInv = QuatInverse(quat);
+	vec4 qvqInv = QuatMultiply(qv, qInv);
+
+	return vec3(qvqInv.x, qvqInv.y, qvqInv.z);
+}
+
+vec4 QuatFromAngleUnitAxis(float angle, vec3 axis)
+{
+	float cosHalfAngle = cos(angle / 2.0);
+	float sinHalfAngle = sin(angle / 2.0);
+
+	return vec4(axis.x * sinHalfAngle, axis.y * sinHalfAngle, axis.z * sinHalfAngle, cosHalfAngle);
+}
+
+// Returns a quaternion for the rotation required to align unit X vector with unit vector reference
+vec4 QuatRotationFromUnitX(vec3 reference)
+{
+	float dotRefUnitX = dot(vec3(1.0, 0.0, 0.0), reference);
+	if (dotRefUnitX > 0.99999f) {
+		return QUAT_ONE;
+	}
+	else if (dotRefUnitX < -0.99999f) {
+		// 180-degree rotation about y axis (perpendicular to x)
+		// comptime angle = PI, cosHalfAngle = 0, sinHalfAngle = 1, axis = 0.0, 1.0, 0.0
+		return vec4(0.0, 1.0, 0.0, 0.0);
+	}
+
+	float angle = 1.0 + dotRefUnitX;
+	vec3 unitAxis = normalize(cross(vec3(1.0, 0.0, 0.0), reference));
+	return QuatFromAngleUnitAxis(angle, unitAxis);
+}
+
+vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomSeed)
+{
+	uint randomState = randomSeed;
+
 	float intensity = 1.0;
 	vec3 color = vec3(0.0, 0.0, 0.0);
 
@@ -49,8 +134,8 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 		float hitDist = MAX_DIST;
 
 		for (uint j = 0; j < triangles.length(); j++) {
-			vec3 triangleNormal = triangles[j].normal;
-			float dotNegRayNormal = dot(rayDir, triangleNormal);
+			vec3 normal = triangles[j].normal;
+			float dotNegRayNormal = dot(rayDir, normal);
 			if (dotNegRayNormal > 0.0) {
 				continue;
 			}
@@ -83,9 +168,8 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 
 			float t = f * dot(ac, q);
 			if (t > MIN_DIST && t < hitDist) {
-				return vec3(1.0, 0.0, 1.0);
 				hitMaterialIndex = triangles[j].materialIndex;
-				hitNormal = triangleNormal;
+				hitNormal = normal;
 				hitDist = t;
 			}
 		}
@@ -99,8 +183,17 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 			else {
 				intensity *= 0.5f;
 				rayOrigin += rayDir * hitDist;
+
 				vec3 pureBounce = rayDir - 2.0f * dot(rayDir, hitNormal) * hitNormal;
-				rayDir = pureBounce;
+				vec3 randomHemisphereUnitX = normalize(vec3(
+					RandomUnilateral(randomState),
+					RandomBilateral(randomState),
+					RandomBilateral(randomState)
+				));
+				vec4 quatXToNormal = QuatRotationFromUnitX(hitNormal);
+				vec3 randomBounce = QuatRotate(randomHemisphereUnitX, quatXToNormal);
+
+				rayDir = normalize(mix(randomBounce, pureBounce, hitMaterial.smoothness));
 			}
 		}
 	}
@@ -116,6 +209,8 @@ void main()
 	vec3 filmPos = ubo.filmTopLeft + filmOffsetX + filmOffsetY;
 	vec3 rayDir = normalize(filmPos - ubo.cameraPos);
 
-	vec4 color = vec4(RaycastColor(ubo.cameraPos, rayDir), 1.0);
-	imageStore(resultImage, ivec2(gl_GlobalInvocationID.xy), color);
+	uint seed = pixel.x * 53829 + pixel.y * 17;
+	vec3 raycastColor = RaycastColor(ubo.cameraPos, rayDir, seed);
+
+	imageStore(resultImage, ivec2(gl_GlobalInvocationID.xy), vec4(raycastColor, 1.0));
 }

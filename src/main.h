@@ -47,6 +47,8 @@ struct VulkanAppState
     VulkanCompositePipeline compositePipeline;
 
     // compute ----------------------------------------------
+    const static uint32 BATCH_SIZE = 16;
+
     VkQueue computeQueue;
     VkCommandPool computeCommandPool;
 

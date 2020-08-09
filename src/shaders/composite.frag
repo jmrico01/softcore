@@ -116,18 +116,24 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir)
 void main()
 {
 	vec2 pixelSize = 1.0 / vec2(textureSize(raytracedColor, 0));
+	float nearbyBlend = 0.0;
 
-	vec4 colorRasterized = texture(rasterizedColor, inUv);
-	vec3 colorRasterizedAlphaMult = colorRasterized.rgb * colorRasterized.a;
+	// vec4 colorRasterized = texture(rasterizedColor, inUv);
+	// vec3 colorRasterizedAlphaMult = colorRasterized.rgb * colorRasterized.a;
 
-	float nearbyBlend = 0.4;
+	vec3 colorRasterized = texture(rasterizedColor, inUv).rgb;
+	colorRasterized += texture(rasterizedColor, inUv + vec2( pixelSize.x, 0.0)).rgb * nearbyBlend;
+	colorRasterized += texture(rasterizedColor, inUv + vec2(0.0,  pixelSize.y)).rgb * nearbyBlend;
+	colorRasterized += texture(rasterizedColor, inUv + vec2(0.0, -pixelSize.y)).rgb * nearbyBlend;
+	colorRasterized += texture(rasterizedColor, inUv + vec2(-pixelSize.x, 0.0)).rgb * nearbyBlend;
+
 	vec3 colorRaytraced = texture(raytracedColor, inUv).rgb;
 	colorRaytraced += texture(raytracedColor, inUv + vec2( pixelSize.x, 0.0)).rgb * nearbyBlend;
 	colorRaytraced += texture(raytracedColor, inUv + vec2(0.0,  pixelSize.y)).rgb * nearbyBlend;
 	colorRaytraced += texture(raytracedColor, inUv + vec2(0.0, -pixelSize.y)).rgb * nearbyBlend;
 	colorRaytraced += texture(raytracedColor, inUv + vec2(-pixelSize.x, 0.0)).rgb * nearbyBlend;
 
-	vec3 colorBlended = colorRasterized.rgb;// mix(colorRaytraced, colorRasterized.rgb, colorRasterized.a);
+	vec3 colorBlended = colorRasterized;// mix(colorRaytraced, colorRasterized.rgb, colorRasterized.a);
     outColor = vec4(colorBlended, 1.0);
 
 /*
