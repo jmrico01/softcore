@@ -382,6 +382,7 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, 
     Vec3 color = Vec3::zero;
 
     for (uint32 b = 0; b < bounces; b++) {
+        // TODO I think this is causing artifacts, because we could be dividing by zero
         const Vec3 inverseRayDir = Reciprocal(rayDir);
 
         uint32 hitMaterialIndex = geometry.materials.size;

@@ -16,6 +16,26 @@
 
 #define DISCRETE_GPU 1
 
+struct ComputeMaterial
+{
+    Vec3 albedo;
+    float32 smoothness;
+    Vec3 emissionColor;
+    float32 emission;
+};
+
+struct ComputeBvh
+{
+	Vec3 aabbMin;
+	uint32 child1;
+	Vec3 aabbMax;
+	uint32 child2;
+	uint32 startTriangle;
+	uint32 endTriangle;
+    uint32 pad[2];
+};
+static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
+
 struct ComputeTriangle
 {
     alignas(16) Vec3 a;
@@ -24,14 +44,7 @@ struct ComputeTriangle
     alignas(16) Vec3 normal;
     uint32 materialIndex;
 };
-
-struct ComputeMaterial
-{
-    Vec3 albedo;
-    float32 smoothness;
-    Vec3 emissionColor;
-    float32 emission;
-};
+static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
 
 struct ComputeUbo
 {
@@ -87,7 +100,7 @@ const int WINDOW_START_WIDTH  = 1024;
 const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
-const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(1);
+const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
 
 internal AppState* GetAppState(AppMemory* memory)
 {
@@ -909,10 +922,14 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
         return false;
     }
 
+    QueueFamilyInfo queueFamilyInfo = GetQueueFamilyInfo(window.surface, window.physicalDevice, &allocator);
+    if (!queueFamilyInfo.hasComputeFamily) {
+        LOG_ERROR("Device has no compute family\n");
+        return false;
+    }
+
     // Create command pool
     {
-        QueueFamilyInfo queueFamilyInfo = GetQueueFamilyInfo(window.surface, window.physicalDevice, &allocator);
-
         VkCommandPoolCreateInfo poolCreateInfo = {};
         poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         poolCreateInfo.queueFamilyIndex = queueFamilyInfo.graphicsFamilyIndex;
@@ -957,22 +974,16 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
 
         // compute queue and command pool
         {
-            QueueFamilyInfo qfi = GetQueueFamilyInfo(window.surface, window.physicalDevice, &allocator);
-            if (!qfi.hasComputeFamily) {
-                LOG_ERROR("Device has no compute family\n");
-                return false;
-            }
-
             VkDeviceQueueCreateInfo queueCreateInfo = {};
             queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
             queueCreateInfo.pNext = nullptr;
-            queueCreateInfo.queueFamilyIndex = qfi.computeFamilyIndex;
+            queueCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
             queueCreateInfo.queueCount = 1;
-            vkGetDeviceQueue(window.device, qfi.computeFamilyIndex, 0, &app->computeQueue);
+            vkGetDeviceQueue(window.device, queueFamilyInfo.computeFamilyIndex, 0, &app->computeQueue);
 
             VkCommandPoolCreateInfo commandPoolCreateInfo = {};
             commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-            commandPoolCreateInfo.queueFamilyIndex = qfi.computeFamilyIndex;
+            commandPoolCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
             commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
             if (vkCreateCommandPool(window.device, &commandPoolCreateInfo, nullptr,
@@ -982,9 +993,12 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             }
         }
 
-        // triangles
+        // triangles and BVHs
         {
             DynamicArray<ComputeTriangle, LinearAllocator> triangles(&allocator);
+            DynamicArray<ComputeBvh, LinearAllocator> bvhs(&allocator);
+            DynamicArray<RaycastMeshBvh, LinearAllocator> bvhStack(&allocator);
+
             for (uint32 i = 0; i < geometry.meshes.size; i++) {
                 const RaycastMesh& mesh = geometry.meshes[i];
                 if (mesh.numTriangles != mesh.bvh.triangles.size) {
@@ -992,8 +1006,17 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
                     return false;
                 }
 
-                for (uint32 j = 0; j < mesh.bvh.triangles.size; j++) {
-                    const RaycastTriangle& srcTriangle = mesh.bvh.triangles[j];
+                const RaycastMeshBvh& srcBvh = mesh.bvh;
+                ComputeBvh* dstBvh = bvhs.Append();
+                dstBvh->aabbMin = srcBvh.aabb.min;
+                dstBvh->aabbMax = srcBvh.aabb.max;
+                dstBvh->child1 = 0;
+                dstBvh->child2 = 0;
+                dstBvh->startTriangle = triangles.size;
+                dstBvh->endTriangle = triangles.size + srcBvh.triangles.size;
+
+                for (uint32 j = 0; j < srcBvh.triangles.size; j++) {
+                    const RaycastTriangle& srcTriangle = srcBvh.triangles[j];
                     ComputeTriangle* dstTriangle = triangles.Append();
                     dstTriangle->a = srcTriangle.pos[0];
                     dstTriangle->b = srcTriangle.pos[1];
@@ -1003,39 +1026,62 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
                 }
             }
 
-            const VkDeviceSize bufferSize = triangles.size * sizeof(ComputeTriangle);
+            const VkDeviceSize triangleBufferSize = triangles.size * sizeof(ComputeTriangle);
+            const VkDeviceSize bvhBufferSize = bvhs.size * sizeof(ComputeBvh);
             app->numTriangles = triangles.size;
+            app->numBvhs = bvhs.size;
 
+            const VkDeviceSize stagingBufferSize = MaxUInt64(triangleBufferSize, bvhBufferSize);
             VulkanBuffer stagingBuffer;
-            if (!CreateVulkanBuffer(bufferSize,
+            if (!CreateVulkanBuffer(stagingBufferSize,
                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                     window.device, window.physicalDevice, &stagingBuffer)) {
-                LOG_ERROR("CreateBuffer failed for staging buffer\n");
+                LOG_ERROR("CreateVulkanBuffer failed\n");
                 return false;
             }
-
-            // Copy vertex data from CPU into memory-mapped staging buffer
+            defer(DestroyVulkanBuffer(window.device, &stagingBuffer));
             void* data;
-            vkMapMemory(window.device, stagingBuffer.memory, 0, bufferSize, 0, &data);
-            MemCopy(data, triangles.data, bufferSize);
-            vkUnmapMemory(window.device, stagingBuffer.memory);
 
-            if (!CreateVulkanBuffer(bufferSize,
+            // Create triangle storage buffer
+            if (!CreateVulkanBuffer(triangleBufferSize,
                                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                     window.device, window.physicalDevice, &app->computeTriangles)) {
-                LOG_ERROR("CreateBuffer failed for vertex buffer\n");
+                LOG_ERROR("CreateVulkanBuffer failed\n");
                 return false;
             }
 
-            // Copy vertex data from staging buffer into GPU vertex buffer
+            // Copy triangle data to staging buffer
+            vkMapMemory(window.device, stagingBuffer.memory, 0, triangleBufferSize, 0, &data);
+            MemCopy(data, triangles.data, triangleBufferSize);
+            vkUnmapMemory(window.device, stagingBuffer.memory);
+
+            // Copy triangle data to final storage buffer
             {
                 SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
-                CopyBuffer(commandBuffer, stagingBuffer.buffer, app->computeTriangles.buffer, bufferSize);
+                CopyBuffer(commandBuffer, stagingBuffer.buffer, app->computeTriangles.buffer, triangleBufferSize);
             }
 
-            DestroyVulkanBuffer(window.device, &stagingBuffer);
+            // Create bvh storage buffer
+            if (!CreateVulkanBuffer(bvhBufferSize,
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                    window.device, window.physicalDevice, &app->computeBvhs)) {
+                LOG_ERROR("CreateVulkanBuffer failed\n");
+                return false;
+            }
+
+            // Copy triangle data to staging buffer
+            vkMapMemory(window.device, stagingBuffer.memory, 0, bvhBufferSize, 0, &data);
+            MemCopy(data, bvhs.data, bvhBufferSize);
+            vkUnmapMemory(window.device, stagingBuffer.memory);
+
+            // Copy triangle data to final storage buffer
+            {
+                SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
+                CopyBuffer(commandBuffer, stagingBuffer.buffer, app->computeBvhs.buffer, bvhBufferSize);
+            }
         }
 
         // uniform buffer
@@ -1080,35 +1126,10 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
                                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
         }
 
-        // sampler
-        {
-            VkSamplerCreateInfo createInfo = {};
-            createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-            createInfo.magFilter = VK_FILTER_NEAREST;
-            createInfo.minFilter = VK_FILTER_NEAREST;
-            createInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            createInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            createInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-            createInfo.anisotropyEnable = VK_FALSE;
-            createInfo.maxAnisotropy = 1.0f;
-            createInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-            createInfo.unnormalizedCoordinates = VK_FALSE;
-            createInfo.compareEnable = VK_FALSE;
-            createInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-            createInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-            createInfo.mipLodBias = 0.0f;
-            createInfo.minLod = 0.0f;
-            createInfo.maxLod = 0.0f;
-
-            if (vkCreateSampler(window.device, &createInfo, nullptr, &app->computeSampler) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateSampler failed\n");
-                return false;
-            }
-        }
-
         // descriptor set layout
         {
-            VkDescriptorSetLayoutBinding layoutBindings[3] = {};
+            VkDescriptorSetLayoutBinding layoutBindings[4] = {};
+
             layoutBindings[0].binding = 0;
             layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             layoutBindings[0].descriptorCount = 1;
@@ -1126,6 +1147,12 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             layoutBindings[2].descriptorCount = 1;
             layoutBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
             layoutBindings[2].pImmutableSamplers = nullptr;
+
+            layoutBindings[3].binding = 3;
+            layoutBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            layoutBindings[3].descriptorCount = 1;
+            layoutBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            layoutBindings[3].pImmutableSamplers = nullptr;
 
             VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
             layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1150,7 +1177,7 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             poolSizes[1].descriptorCount = 1;
 
             poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            poolSizes[2].descriptorCount = 1;
+            poolSizes[2].descriptorCount = 2;
 
             VkDescriptorPoolCreateInfo poolInfo = {};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1177,7 +1204,7 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
                 return false;
             }
 
-            VkWriteDescriptorSet descriptorWrites[3] = {};
+            VkWriteDescriptorSet descriptorWrites[4] = {};
 
             const VkDescriptorImageInfo imageInfo = {
                 .sampler = VK_NULL_HANDLE,
@@ -1217,6 +1244,19 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
             descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             descriptorWrites[2].descriptorCount = 1;
             descriptorWrites[2].pBufferInfo = &triangleBufferInfo;
+
+            const VkDescriptorBufferInfo bvhBufferInfo = {
+                .buffer = app->computeBvhs.buffer,
+                .offset = 0,
+                .range = app->numBvhs * sizeof(ComputeBvh),
+            };
+            descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[3].dstSet = app->computeDescriptorSet;
+            descriptorWrites[3].dstBinding = 3;
+            descriptorWrites[3].dstArrayElement = 0;
+            descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[3].descriptorCount = 1;
+            descriptorWrites[3].pBufferInfo = &bvhBufferInfo;
 
             vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
         }
@@ -1436,6 +1476,17 @@ APP_UNLOAD_VULKAN_WINDOW_STATE_FUNCTION(AppUnloadVulkanWindowState)
     UnloadSpritePipelineWindow(device, &app->spritePipeline);
     UnloadCompositePipelineWindow(device, &app->compositePipeline);
     UnloadMeshPipelineWindow(device, &app->meshPipeline);
+
+    vkDestroyFence(device, app->computeFence, nullptr);
+    vkDestroyPipeline(device, app->computePipeline, nullptr);
+    vkDestroyPipelineLayout(device, app->computePipelineLayout, nullptr);
+    vkDestroyDescriptorPool(device, app->computeDescriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, app->computeDescriptorSetLayout, nullptr);
+    DestroyVulkanImage(device, &app->computeImage);
+    DestroyVulkanBuffer(device, &app->computeUniform);
+    DestroyVulkanBuffer(device, &app->computeBvhs);
+    DestroyVulkanBuffer(device, &app->computeTriangles);
+    vkDestroyCommandPool(device, app->computeCommandPool, nullptr);
 
     vkDestroyFence(device, app->fence, nullptr);
     vkDestroyCommandPool(device, app->commandPool, nullptr);

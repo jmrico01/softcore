@@ -53,10 +53,11 @@ struct VulkanAppState
     VkCommandPool computeCommandPool;
 
     VulkanImage computeImage;
-    VkSampler computeSampler;
 
     uint32 numTriangles;
     VulkanBuffer computeTriangles;
+    uint32 numBvhs;
+    VulkanBuffer computeBvhs;
     VulkanBuffer computeUniform;
 
     VkDescriptorSetLayout computeDescriptorSetLayout;
