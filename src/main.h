@@ -63,6 +63,7 @@ struct AppState
 
     Vec3 cameraPos;
     Vec2 cameraAngles;
+    float32 fovDegrees;
 
     CanvasState canvas;
     RaycastGeometry raycastGeometry;

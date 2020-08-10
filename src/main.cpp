@@ -19,7 +19,7 @@
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
-const int WINDOW_START_HEIGHT = 768;
+const int WINDOW_START_HEIGHT = 1024;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
 const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
@@ -183,6 +183,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->cameraPos = START_SCENE_INFO.pos;
         appState->cameraAngles = START_SCENE_INFO.angles;
+        appState->fovDegrees = 50.0f;
 
         appState->canvas.screenFill = 0.5f;
         appState->canvas.decayFrames = 2;
@@ -286,22 +287,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->cameraPos += velocity * speed * deltaTime;
     }
 
-    const Quat cameraRot = cameraRotPitch * cameraRotYaw;
-    const Mat4 cameraRotMat4 = UnitQuatToMat4(cameraRot);
-
-    // Transforms world-view camera (+X forward, +Z up) to Vulkan camera (+Z forward, -Y up)
-    const Quat baseCameraRot = QuatFromAngleUnitAxis(-PI_F / 2.0f, Vec3::unitY)
-        * QuatFromAngleUnitAxis(PI_F / 2.0f, Vec3::unitX);
-    const Mat4 baseCameraRotMat4 = UnitQuatToMat4(baseCameraRot);
-
-    const Mat4 view = baseCameraRotMat4 * cameraRotMat4 * Translate(-appState->cameraPos);
-
-    const float32 fov = PI_F / 4.0f;
-    const float32 aspect = (float32)screenSize.x / (float32)screenSize.y;
-    const float32 nearZ = 0.1f;
-    const float32 farZ = 100.0f;
-    const Mat4 proj = Perspective(fov, aspect, nearZ, farZ);
-
     // Debug views
     if (appState->debugView) {
         LinearAllocator allocator(transientState->scratch);
@@ -393,23 +378,38 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
 
         panelDebugInfo.Text(string::empty);
-        static PanelSliderState inputTest1 = {
-            .value = appState->canvas.test1
+
+        panelDebugInfo.Text(ToString("Field of view"));
+        static PanelSliderState sliderStateFov = {
+            .value = appState->fovDegrees
         };
-        static PanelSliderState inputTest2 = {
-            .value = appState->canvas.test2
-        };
-        static PanelSliderState inputTest3 = {
-            .value = appState->canvas.test3
-        };
-        if (panelDebugInfo.SliderFloat(&inputTest1, 0.0f, 1.0f)) {
-            appState->canvas.test1 = inputTest1.value;
+        if (panelDebugInfo.SliderFloat(&sliderStateFov, 0.0f, 180.0f)) {
+            appState->fovDegrees = sliderStateFov.value;
         }
-        if (panelDebugInfo.SliderFloat(&inputTest2, -0.2f, 0.0f)) {
-            appState->canvas.test2 = inputTest2.value;
+
+        panelDebugInfo.Text(ToString("Material"));
+        static PanelDropdownState materialDropdownState = {};
+        RaycastMaterial* selectedMaterial = &appState->raycastGeometry.materials[materialDropdownState.selected];
+        static PanelSliderState sliderSurfaceSmoothness = {
+            .value = selectedMaterial->smoothness
+        };
+        static PanelSliderState sliderSurfaceEmission = {
+            .value = selectedMaterial->emission
+        };
+
+        if (panelDebugInfo.Dropdown(&materialDropdownState, appState->raycastGeometry.materialNames)) {
+            selectedMaterial = &appState->raycastGeometry.materials[materialDropdownState.selected];
+            sliderSurfaceSmoothness.value = selectedMaterial->smoothness;
+            sliderSurfaceEmission.value = selectedMaterial->emission;
         }
-        if (panelDebugInfo.SliderFloat(&inputTest3, 0.0f, 0.2f)) {
-            appState->canvas.test3 = inputTest3.value;
+
+        panelDebugInfo.Text(ToString("Smoothness"));
+        if (panelDebugInfo.SliderFloat(&sliderSurfaceSmoothness, 0.0f, 1.0f)) {
+            selectedMaterial->smoothness = sliderSurfaceSmoothness.value;
+        }
+        panelDebugInfo.Text(ToString("Emission"));
+        if (panelDebugInfo.SliderFloat(&sliderSurfaceEmission, 0.0f, 4.0f)) {
+            selectedMaterial->emission = sliderSurfaceEmission.value;
         }
 
         panelDebugInfo.Draw(panelBorderSize, Vec4::one, backgroundColor, screenSize,
@@ -419,6 +419,22 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     // ================================================================================================
     // Rendering ======================================================================================
     // ================================================================================================
+
+    const Quat cameraRot = cameraRotPitch * cameraRotYaw;
+    const Mat4 cameraRotMat4 = UnitQuatToMat4(cameraRot);
+
+    // Transforms world-view camera (+X forward, +Z up) to Vulkan camera (+Z forward, -Y up)
+    const Quat baseCameraRot = QuatFromAngleUnitAxis(-PI_F / 2.0f, Vec3::unitY)
+        * QuatFromAngleUnitAxis(PI_F / 2.0f, Vec3::unitX);
+    const Mat4 baseCameraRotMat4 = UnitQuatToMat4(baseCameraRot);
+
+    const Mat4 view = baseCameraRotMat4 * cameraRotMat4 * Translate(-appState->cameraPos);
+
+    const float32 fovRadians = appState->fovDegrees * PI_F / 180.0f;
+    const float32 aspect = (float32)screenSize.x / (float32)screenSize.y;
+    const float32 nearZ = 0.1f;
+    const float32 farZ = 100.0f;
+    const Mat4 proj = Perspective(fovRadians, aspect, nearZ, farZ);
 
     {
         ZoneScopedN("PreRasterize");
@@ -488,7 +504,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
         uint32* pixels = (uint32*)imageMemory;
 
-        RaytraceRender(appState->cameraPos, cameraRot, fov, appState->raycastGeometry, materialIndices,
+        RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry, materialIndices,
                        screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
@@ -505,11 +521,11 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         const RaycastGeometry& geometry = appState->raycastGeometry;
 
         ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
-        computeUbo->numTopLevelBvhs = raytracePipeline.numBvhs;
+        computeUbo->seed = rand();
 
         {
-            const uint32 width = screenSize.x;
-            const uint32 height = screenSize.y;
+            const uint32 width = WINDOW_START_WIDTH;//screenSize.x;
+            const uint32 height = WINDOW_START_HEIGHT;//screenSize.y;
             const Vec3 cameraPos = appState->cameraPos;
 
             // TODO copy-pasted from raytracer.cpp for now
@@ -519,7 +535,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             const Vec3 cameraLeft2 = inverseCameraRot * Vec3::unitY;
 
             const float32 filmDist = 1.0f;
-            const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
+            const float32 filmHeight = tanf(fovRadians / 2.0f) * 2.0f;
             const float32 filmWidth = filmHeight * (float32)width / (float32)height;
 
             computeUbo->cameraPos = cameraPos;
@@ -550,17 +566,17 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         MemCopy(data, computeUbo, sizeof(ComputeUbo));
         vkUnmapMemory(vulkanState.window.device, raytracePipeline.computeUniform.memory);
 
-		VkSubmitInfo submitInfo = {};
+        VkSubmitInfo submitInfo = {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.waitSemaphoreCount = 0;
         submitInfo.pWaitSemaphores = nullptr;
         submitInfo.pWaitDstStageMask = nullptr;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &raytracePipeline.computeCommandBuffer;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &raytracePipeline.computeCommandBuffer;
         submitInfo.signalSemaphoreCount = 0;
         submitInfo.pSignalSemaphores = nullptr;
 
-		if (vkQueueSubmit(raytracePipeline.computeQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
+        if (vkQueueSubmit(raytracePipeline.computeQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
             LOG_ERROR("vkQueueSubmit failed\n");
         }
 

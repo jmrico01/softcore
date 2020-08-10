@@ -40,7 +40,7 @@ struct ComputeUbo
     const static uint32 MAX_MATERIALS = 32;
 
 	alignas(16) Vec3 cameraPos;
-    uint32 numTopLevelBvhs;
+    uint32 seed;
 	alignas(16) Vec3 filmTopLeft;
 	alignas(16) Vec3 filmUnitOffsetX;
 	alignas(16) Vec3 filmUnitOffsetY;
@@ -49,10 +49,10 @@ struct ComputeUbo
 
 struct RaycastMaterial
 {
-    float32 smoothness;
     Vec3 albedo;
-    float32 emission;
+    float32 smoothness;
     Vec3 emissionColor;
+    float32 emission;
 };
 
 struct RaycastTriangle
@@ -78,6 +78,7 @@ struct RaycastMesh
 
 struct RaycastGeometry
 {
+    Array<string> materialNames;
     Array<RaycastMaterial> materials;
     Array<RaycastMesh> meshes;
 };

@@ -56,13 +56,13 @@ bool GetMaterial(const_string name, RaycastMaterial* material)
         material->smoothness = 0.0f;
         material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
         material->emission = 1.5f;
-        material->emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->emissionColor = Vec3 { 0, 255, 129 } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightSoftGreen"))) {
         material->smoothness = 0.0f;
         material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
         material->emission = 1.0f;
-        material->emissionColor = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->emissionColor = Vec3 { 0, 255, 129 } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightPink"))) {
         material->smoothness = 0.0f;
@@ -172,6 +172,10 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTri
 {
     RaycastGeometry geometry = {};
 
+    geometry.materialNames = allocator->NewArray<string>(obj.materials.size);
+    if (geometry.materialNames.data == nullptr) {
+        return geometry;
+    }
     geometry.materials = allocator->NewArray<RaycastMaterial>(obj.materials.size);
     if (geometry.materials.data == nullptr) {
         return geometry;
@@ -179,6 +183,9 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTri
 
     for (uint32 i = 0; i < obj.materials.size; i++) {
         const_string materialName = obj.materials[i].name;
+        geometry.materialNames[i] = allocator->NewArray<char>(materialName.size);
+        MemCopy(geometry.materialNames[i].data, materialName.data, materialName.size);
+
         if (!GetMaterial(materialName, &geometry.materials[i])) {
             LOG_ERROR("Unrecognized material: %.*s\n", materialName.size, materialName.data);
             return geometry;
