@@ -32,15 +32,10 @@ struct StartSceneInfo
 };
 
 const StartSceneInfo START_SCENE_INFOS[] = {
-    { // front view
+    {
         .scene = ToString("interior-1"),
         .pos = Vec3 { 0.64f, -2.35f, 0.44f },
         .angles = Vec2 { -2.04f, -0.11f },
-    },
-    { // buggy center-box view
-        .scene = ToString("interior-1"),
-        .pos = Vec3 { 0.65f, 0.87f, 0.66f },
-        .angles = Vec2 { 2.25f, -0.54f },
     },
     {
         .scene = ToString("interior-2"),
@@ -59,7 +54,7 @@ const StartSceneInfo START_SCENE_INFOS[] = {
     },
 };
 
-const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[2];
+const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[1];
 
 internal AppState* GetAppState(AppMemory* memory)
 {
@@ -216,6 +211,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->inputScreenFillState.value = appState->canvas.screenFill;
         appState->inputDecayFramesState.Initialize(appState->canvas.decayFrames);
         appState->inputBouncesState.Initialize(appState->canvas.bounces);
+        appState->inputSceneDropdownState.selected = 1; // TODO depends on start scene, really
 
         memory->initialized = true;
     }
