@@ -29,11 +29,10 @@ struct Triangle
 struct Bvh
 {
 	vec3 aabbMin;
-	uint child1;
-	vec3 aabbMax;
-	uint child2;
 	uint startTriangle;
+	vec3 aabbMax;
 	uint endTriangle;
+	uint skip;
 };
 
 layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE) in;
@@ -192,6 +191,42 @@ bool RayTriangleIntersection(vec3 rayOrigin, vec3 rayDir, vec3 a, vec3 b, vec3 c
 	return true;
 }
 
+// TODO review inout hitMaterialIndex and other in/out params
+void TraverseBvhs(vec3 rayOrigin, vec3 rayDir, vec3 inverseRayDir,
+				  inout uint hitMaterialIndex, out vec3 hitNormal, inout float hitDist)
+{
+	uint i = 0;
+	while (i < bvhs.length()) {
+		const Bvh bvh = bvhs[i];
+
+		float tMin, tMax;
+		const bool aabbHit = RayAABBIntersection(rayOrigin, inverseRayDir, bvh.aabbMin, bvh.aabbMax, tMin, tMax);
+		if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
+			const uint tStart = bvh.startTriangle;
+			const uint tEnd = bvh.endTriangle;
+			for (uint i = tStart; i < tEnd; i++) {
+				const vec3 normal = triangles[i].normal;
+				const float dotNegRayNormal = dot(rayDir, normal);
+				if (dotNegRayNormal <= 0.0) {
+					float t;
+					const bool triangleHit = RayTriangleIntersection(rayOrigin, rayDir,
+																	 triangles[i].a, triangles[i].b, triangles[i].c, t);
+					if (triangleHit && t > MIN_DIST && t < hitDist) {
+						hitMaterialIndex = triangles[i].materialIndex;
+						hitNormal = normal;
+						hitDist = t;
+					}
+				}
+			}
+
+			i++;
+		}
+		else {
+			i += bvh.skip;
+		}
+	}
+}
+
 vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomSeed)
 {
 	uint randomState = randomSeed;
@@ -205,32 +240,12 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomSeed)
 		vec3 hitNormal;
 		float hitDist = MAX_DIST;
 
-		for (uint j = 0; j < bvhs.length(); j++) {
-			float tMin, tMax;
-			if (RayAABBIntersection(rayOrigin, inverseRayDir, bvhs[j].aabbMin, bvhs[j].aabbMax, tMin, tMax)
-				&& !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
-				const uint tStart = bvhs[j].startTriangle;
-				const uint tEnd = bvhs[j].endTriangle;
-				for (uint k = tStart; k < tEnd; k++) {
-					const vec3 normal = triangles[k].normal;
-					const float dotNegRayNormal = dot(rayDir, normal);
-					if (dotNegRayNormal > 0.0) {
-						continue;
-					}
+		TraverseBvhs(rayOrigin, rayDir, inverseRayDir, hitMaterialIndex, hitNormal, hitDist);
 
-					float t;
-					if (RayTriangleIntersection(rayOrigin, rayDir, triangles[k].a, triangles[k].b, triangles[k].c, t)) {
-						if (t > MIN_DIST && t < hitDist) {
-							hitMaterialIndex = triangles[k].materialIndex;
-							hitNormal = normal;
-							hitDist = t;
-						}
-					}
-				}
-			}
+		if (hitMaterialIndex == MAX_MATERIALS) {
+			break;
 		}
-
-		if (hitMaterialIndex != MAX_MATERIALS) {
+		else {
 			Material hitMaterial = ubo.materials[hitMaterialIndex];
 			if (hitMaterial.emission > 0.0) {
 				color = hitMaterial.emission * hitMaterial.emissionColor * intensity;

@@ -43,33 +43,9 @@ struct VulkanAppState
     VkImage image;
     VkDeviceMemory imageMemory;
 
+    VulkanRaytracePipeline raytracePipeline;
     VulkanMeshPipeline meshPipeline;
     VulkanCompositePipeline compositePipeline;
-
-    // compute ----------------------------------------------
-    const static uint32 BATCH_SIZE = 16;
-
-    VkQueue computeQueue;
-    VkCommandPool computeCommandPool;
-
-    VulkanImage computeImage;
-
-    uint32 numTriangles;
-    VulkanBuffer computeTriangles;
-    uint32 numBvhs;
-    VulkanBuffer computeBvhs;
-    VulkanBuffer computeUniform;
-
-    VkDescriptorSetLayout computeDescriptorSetLayout;
-    VkDescriptorPool computeDescriptorPool;
-    VkDescriptorSet computeDescriptorSet;
-
-    VkPipelineLayout computePipelineLayout;
-    VkPipeline computePipeline;
-
-    VkCommandBuffer computeCommandBuffer;
-    VkFence computeFence;
-    // ------------------------------------------------------
 
     VulkanSpritePipeline<(uint32)SpriteId::COUNT> spritePipeline;
     VulkanTextPipeline<(uint32)FontId::COUNT> textPipeline;

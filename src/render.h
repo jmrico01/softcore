@@ -42,17 +42,10 @@ struct MeshUniformBufferObject
 
 struct VulkanCompositePipeline
 {
-    const static uint32 TRIANGLE_GEOMETRY_ATLAS_SIZE = 2048;
-    const static uint32 TRIANGLE_MATERIALS_ATLAS_SIZE = TRIANGLE_GEOMETRY_ATLAS_SIZE / 4;
-
     VulkanBuffer vertexBuffer;
-    VulkanBuffer uniformBuffer;
 
     VulkanImage raytracedImage;
     VkSampler sampler;
-
-    VulkanImage triangleGeometry;
-    VulkanImage triangleMaterialInds;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -60,26 +53,6 @@ struct VulkanCompositePipeline
 
     VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
-};
-
-struct CompositeMaterial
-{
-    alignas(16) Vec3 albedo;
-    alignas(16) Vec3 emissionColor;
-    float32 smoothness;
-    float32 emission;
-};
-
-struct CompositeUniformBufferObject
-{
-    const static uint32 MAX_MATERIALS = 8;
-
-    alignas(16) CompositeMaterial materials[MAX_MATERIALS];
-    alignas(16) Vec3 filmTopLeft;
-    alignas(16) Vec3 filmUnitOffsetX;
-    alignas(16) Vec3 filmUnitOffsetY;
-    alignas(16) Vec3 cameraPos;
-    uint32 numTriangles;
 };
 
 bool LoadMeshPipelineSwapchain(const VulkanWindow& window, const VulkanSwapchain& swapchain, VkCommandPool commandPool,
@@ -95,6 +68,6 @@ bool LoadCompositePipelineSwapchain(const VulkanWindow& window, const VulkanSwap
                                     VulkanCompositePipeline* compositePipeline);
 void UnloadCompositePipelineSwapchain(VkDevice device, VulkanCompositePipeline* compositePipeline);
 
-bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, const LoadObjResult& obj,
-                                 LinearAllocator* allocator, VulkanCompositePipeline* compositePipeline);
+bool LoadCompositePipelineWindow(const VulkanWindow& window, VkCommandPool commandPool, LinearAllocator* allocator,
+                                 VulkanCompositePipeline* compositePipeline);
 void UnloadCompositePipelineWindow(VkDevice device, VulkanCompositePipeline* compositePipeline);

@@ -103,7 +103,7 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 bvhMaxTriangles,
     for (uint32 i = 0; i < triangles.size; i++) {
         bool inside = false;
         for (int k = 0; k < 3; k++) {
-            if (IsInside(triangles[i].pos[k], minBox)) {
+            if (IsInsideInclusive(triangles[i].pos[k], minBox)) {
                 // Only 1 vertex needs to be inside for the whole triangle to be inside
                 inside = true;
                 break;
@@ -343,7 +343,7 @@ bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTri
 
 const uint32 BVH_STACK_SIZE = 4096;
 
-bool TraverseMeshBox(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 minDist,
+bool TraverseMeshBvh(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 minDist,
                      const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE],
                      uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
@@ -391,7 +391,7 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, 
         for (uint32 i = 0; i < geometry.meshes.size; i++) {
             const RaycastMesh& mesh = geometry.meshes[i];
             bvhStack[0] = &mesh.bvh;
-            TraverseMeshBox(rayOrigin, rayDir, inverseRayDir, minDist, bvhStack,
+            TraverseMeshBvh(rayOrigin, rayDir, inverseRayDir, minDist, bvhStack,
                             &hitMaterialIndex, &hitNormal, &hitDist);
         }
 
@@ -596,4 +596,453 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
     }
 
     TracyCZoneEnd(zoneHdrTranslate);
+}
+
+uint32 CountSubBvhs(const RaycastMeshBvh* root, LinearAllocator* allocator)
+{
+    SCOPED_ALLOCATOR_RESET(*allocator);
+
+    uint32 count = 0;
+    DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(allocator);
+    bvhStack.Append(root);
+
+    while (bvhStack.size > 0) {
+        const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
+        bvhStack.RemoveLast();
+        count++;
+
+        if (bvh->child1 != nullptr) {
+            bvhStack.Append(bvh->child1);
+            bvhStack.Append(bvh->child2);
+        }
+    }
+
+    return count - 1;
+}
+
+bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,
+                          const RaycastGeometry& geometry, LinearAllocator* allocator, VulkanRaytracePipeline* pipeline)
+{
+    QueueFamilyInfo queueFamilyInfo = GetQueueFamilyInfo(window.surface, window.physicalDevice, allocator);
+    if (!queueFamilyInfo.hasComputeFamily) {
+        LOG_ERROR("Device has no compute family\n");
+        return false;
+    }
+
+    // compute queue and command pool
+    {
+        VkDeviceQueueCreateInfo queueCreateInfo = {};
+        queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfo.pNext = nullptr;
+        queueCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
+        queueCreateInfo.queueCount = 1;
+        vkGetDeviceQueue(window.device, queueFamilyInfo.computeFamilyIndex, 0, &pipeline->computeQueue);
+
+        VkCommandPoolCreateInfo commandPoolCreateInfo = {};
+        commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        commandPoolCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
+        commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+
+        if (vkCreateCommandPool(window.device, &commandPoolCreateInfo, nullptr,
+                                &pipeline->computeCommandPool) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateCommandPool failed\n");
+            return false;
+        }
+    }
+
+    // triangles and BVHs
+    {
+        SCOPED_ALLOCATOR_RESET(*allocator);
+
+        DynamicArray<ComputeTriangle, LinearAllocator> triangles(allocator);
+        DynamicArray<ComputeBvh, LinearAllocator> bvhs(allocator);
+        DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(allocator);
+
+        for (uint32 i = 0; i < geometry.meshes.size; i++) {
+            const RaycastMesh& mesh = geometry.meshes[i];
+
+            bvhStack.Clear();
+            bvhStack.Append(&mesh.bvh);
+            while (bvhStack.size > 0) {
+                const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
+                bvhStack.RemoveLast();
+
+                ComputeBvh* newBvh = bvhs.Append();
+                newBvh->aabbMin = bvh->aabb.min;
+                newBvh->aabbMax = bvh->aabb.max;
+                newBvh->skip = CountSubBvhs(bvh, allocator) + 1;
+
+                if (bvh->child1 == nullptr) {
+                    newBvh->startTriangle = triangles.size;
+
+                    for (uint32 j = 0; j < bvh->triangles.size; j++) {
+                        const RaycastTriangle& srcTriangle = bvh->triangles[j];
+                        ComputeTriangle* dstTriangle = triangles.Append();
+                        dstTriangle->a = srcTriangle.pos[0];
+                        dstTriangle->b = srcTriangle.pos[1];
+                        dstTriangle->c = srcTriangle.pos[2];
+                        dstTriangle->normal = srcTriangle.normal;
+                        dstTriangle->materialIndex = srcTriangle.materialIndex;
+                    }
+
+                    newBvh->endTriangle = triangles.size;
+                }
+                else {
+                    newBvh->startTriangle = 0;
+                    newBvh->endTriangle = 0;
+
+                    // pre-order traversal
+                    bvhStack.Append(bvh->child2);
+                    bvhStack.Append(bvh->child1);
+                }
+            }
+        }
+
+        const VkDeviceSize triangleBufferSize = triangles.size * sizeof(ComputeTriangle);
+        const VkDeviceSize bvhBufferSize = bvhs.size * sizeof(ComputeBvh);
+        pipeline->numTriangles = triangles.size;
+        pipeline->numBvhs = bvhs.size;
+
+        const VkDeviceSize stagingBufferSize = MaxUInt64(triangleBufferSize, bvhBufferSize);
+        VulkanBuffer stagingBuffer;
+        if (!CreateVulkanBuffer(stagingBufferSize,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &stagingBuffer)) {
+            LOG_ERROR("CreateVulkanBuffer failed\n");
+            return false;
+        }
+        defer(DestroyVulkanBuffer(window.device, &stagingBuffer));
+        void* data;
+
+        // Create triangle storage buffer
+        if (!CreateVulkanBuffer(triangleBufferSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                window.device, window.physicalDevice, &pipeline->computeTriangles)) {
+            LOG_ERROR("CreateVulkanBuffer failed\n");
+            return false;
+        }
+
+        // Copy triangle data to staging buffer
+        vkMapMemory(window.device, stagingBuffer.memory, 0, triangleBufferSize, 0, &data);
+        MemCopy(data, triangles.data, triangleBufferSize);
+        vkUnmapMemory(window.device, stagingBuffer.memory);
+
+        // Copy triangle data to final storage buffer
+        {
+            SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->computeTriangles.buffer, triangleBufferSize);
+        }
+
+        // Create bvh storage buffer
+        if (!CreateVulkanBuffer(bvhBufferSize,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                window.device, window.physicalDevice, &pipeline->computeBvhs)) {
+            LOG_ERROR("CreateVulkanBuffer failed\n");
+            return false;
+        }
+
+        // Copy bvh data to staging buffer
+        vkMapMemory(window.device, stagingBuffer.memory, 0, bvhBufferSize, 0, &data);
+        MemCopy(data, bvhs.data, bvhBufferSize);
+        vkUnmapMemory(window.device, stagingBuffer.memory);
+
+        // Copy bvh data to final storage buffer
+        {
+            SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->computeBvhs.buffer, bvhBufferSize);
+        }
+    }
+
+    // uniform buffer
+    {
+        const VkDeviceSize uniformBufferSize = sizeof(ComputeUbo);
+        if (!CreateVulkanBuffer(uniformBufferSize,
+                                VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                window.device, window.physicalDevice, &pipeline->computeUniform)) {
+            LOG_ERROR("CreateBuffer failed for vertex buffer\n");
+            return false;
+        }
+    }
+
+    // image
+    {
+        const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+        VkFormatProperties formatProperties;
+        vkGetPhysicalDeviceFormatProperties(window.physicalDevice, format, &formatProperties);
+        if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
+            LOG_ERROR("Storage image unsupported for format %d\n", format);
+            return false;
+        }
+
+        if (!CreateImage(window.device, window.physicalDevice, width, height, format,
+                         VK_IMAGE_TILING_OPTIMAL,
+                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &pipeline->computeImage.image, &pipeline->computeImage.memory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        if (!CreateImageView(window.device, pipeline->computeImage.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
+                             &pipeline->computeImage.view)) {
+            LOG_ERROR("CreateImageView failed\n");
+            return false;
+        }
+
+        SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+        TransitionImageLayout(commandBuffer, pipeline->computeImage.image,
+                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    }
+
+    // descriptor set layout
+    {
+        VkDescriptorSetLayoutBinding layoutBindings[4] = {};
+
+        layoutBindings[0].binding = 0;
+        layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        layoutBindings[0].descriptorCount = 1;
+        layoutBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        layoutBindings[0].pImmutableSamplers = nullptr;
+
+        layoutBindings[1].binding = 1;
+        layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        layoutBindings[1].descriptorCount = 1;
+        layoutBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        layoutBindings[1].pImmutableSamplers = nullptr;
+
+        layoutBindings[2].binding = 2;
+        layoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[2].descriptorCount = 1;
+        layoutBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        layoutBindings[2].pImmutableSamplers = nullptr;
+
+        layoutBindings[3].binding = 3;
+        layoutBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        layoutBindings[3].descriptorCount = 1;
+        layoutBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        layoutBindings[3].pImmutableSamplers = nullptr;
+
+        VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
+        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutCreateInfo.bindingCount = C_ARRAY_LENGTH(layoutBindings);
+        layoutCreateInfo.pBindings = layoutBindings;
+
+        if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
+                                        &pipeline->computeDescriptorSetLayout) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateDescriptorSetLayout failed\n");
+            return false;
+        }
+    }
+
+    // descriptor pool
+    {
+        VkDescriptorPoolSize poolSizes[3] = {};
+
+        poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        poolSizes[0].descriptorCount = 1;
+
+        poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        poolSizes[1].descriptorCount = 1;
+
+        poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        poolSizes[2].descriptorCount = 2;
+
+        VkDescriptorPoolCreateInfo poolInfo = {};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = C_ARRAY_LENGTH(poolSizes);
+        poolInfo.pPoolSizes = poolSizes;
+        poolInfo.maxSets = 1;
+
+        if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &pipeline->computeDescriptorPool) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateDescriptorPool failed\n");
+            return false;
+        }
+    }
+
+    // descriptor set
+    {
+        VkDescriptorSetAllocateInfo allocInfo = {};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = pipeline->computeDescriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &pipeline->computeDescriptorSetLayout;
+
+        if (vkAllocateDescriptorSets(window.device, &allocInfo, &pipeline->computeDescriptorSet) != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateDescriptorSets failed\n");
+            return false;
+        }
+
+        VkWriteDescriptorSet descriptorWrites[4] = {};
+
+        const VkDescriptorImageInfo imageInfo = {
+            .sampler = VK_NULL_HANDLE,
+            .imageView = pipeline->computeImage.view,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+        };
+        descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[0].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[0].dstBinding = 0;
+        descriptorWrites[0].dstArrayElement = 0;
+        descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        descriptorWrites[0].descriptorCount = 1;
+        descriptorWrites[0].pImageInfo = &imageInfo;
+
+        const VkDescriptorBufferInfo uniformBufferInfo = {
+            .buffer = pipeline->computeUniform.buffer,
+            .offset = 0,
+            .range = sizeof(ComputeUbo),
+        };
+        descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[1].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[1].dstBinding = 1;
+        descriptorWrites[1].dstArrayElement = 0;
+        descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorWrites[1].descriptorCount = 1;
+        descriptorWrites[1].pBufferInfo = &uniformBufferInfo;
+
+        const VkDescriptorBufferInfo triangleBufferInfo = {
+            .buffer = pipeline->computeTriangles.buffer,
+            .offset = 0,
+            .range = pipeline->numTriangles * sizeof(ComputeTriangle),
+        };
+        descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[2].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[2].dstBinding = 2;
+        descriptorWrites[2].dstArrayElement = 0;
+        descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[2].descriptorCount = 1;
+        descriptorWrites[2].pBufferInfo = &triangleBufferInfo;
+
+        const VkDescriptorBufferInfo bvhBufferInfo = {
+            .buffer = pipeline->computeBvhs.buffer,
+            .offset = 0,
+            .range = pipeline->numBvhs * sizeof(ComputeBvh),
+        };
+        descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[3].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[3].dstBinding = 3;
+        descriptorWrites[3].dstArrayElement = 0;
+        descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[3].descriptorCount = 1;
+        descriptorWrites[3].pBufferInfo = &bvhBufferInfo;
+
+        vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
+    }
+
+    // pipeline
+    {
+        const Array<uint8> shaderCode = LoadEntireFile(ToString("data/shaders/raytrace.comp.spv"), allocator);
+        if (shaderCode.data == nullptr) {
+            LOG_ERROR("Failed to load compute shader code\n");
+            return false;
+        }
+
+        VkShaderModule shaderModule;
+        if (!CreateShaderModule(shaderCode, window.device, &shaderModule)) {
+            LOG_ERROR("Failed to create compute shader module\n");
+            return false;
+        }
+        defer(vkDestroyShaderModule(window.device, shaderModule, nullptr));
+
+        VkPipelineShaderStageCreateInfo shaderStageCreateInfo = {};
+        shaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        shaderStageCreateInfo.module = shaderModule;
+        shaderStageCreateInfo.pName = "main";
+
+        VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+        pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutCreateInfo.setLayoutCount = 1;
+        pipelineLayoutCreateInfo.pSetLayouts = &pipeline->computeDescriptorSetLayout;
+        pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
+        pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
+
+        if (vkCreatePipelineLayout(window.device, &pipelineLayoutCreateInfo, nullptr,
+                                   &pipeline->computePipelineLayout) != VK_SUCCESS) {
+            LOG_ERROR("vkCreatePipelineLayout failed\n");
+            return false;
+        }
+
+        VkComputePipelineCreateInfo pipelineCreateInfo = {};
+        pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineCreateInfo.pNext = nullptr;
+        pipelineCreateInfo.flags = 0;
+        pipelineCreateInfo.stage = shaderStageCreateInfo;
+        pipelineCreateInfo.layout = pipeline->computePipelineLayout;
+
+        if (vkCreateComputePipelines(window.device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr,
+                                     &pipeline->computePipeline) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateComputePipelines failed\n");
+            return false;
+        }
+    }
+
+    // command buffer
+    {
+        VkCommandBufferAllocateInfo allocInfo = {};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.pNext = nullptr;
+        allocInfo.commandPool = pipeline->computeCommandPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+
+        if (vkAllocateCommandBuffers(window.device, &allocInfo, &pipeline->computeCommandBuffer) != VK_SUCCESS) {
+            LOG_ERROR("vkAllocateCommandBuffers failed\n");
+            return false;
+        }
+
+        VkCommandBufferBeginInfo beginInfo = {};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = 0;
+        beginInfo.pInheritanceInfo = nullptr;
+
+        if (vkBeginCommandBuffer(pipeline->computeCommandBuffer, &beginInfo) != VK_SUCCESS) {
+            LOG_ERROR("vkBeginCommandBuffer failed\n");
+            return false;
+        }
+
+        vkCmdBindPipeline(pipeline->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->computePipeline);
+        vkCmdBindDescriptorSets(pipeline->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->computePipelineLayout, 0, 1, &pipeline->computeDescriptorSet, 0, 0);
+
+        const uint32 batchSize = VulkanRaytracePipeline::BATCH_SIZE;
+        vkCmdDispatch(pipeline->computeCommandBuffer, width / batchSize, height / batchSize, 1);
+
+        if (vkEndCommandBuffer(pipeline->computeCommandBuffer) != VK_SUCCESS) {
+            LOG_ERROR("vkEndCommandBuffer failed\n");
+            return false;
+        }
+    }
+
+    // fence
+    {
+        VkFenceCreateInfo fenceCreateInfo = {};
+        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceCreateInfo.flags = 0;//VK_FENCE_CREATE_SIGNALED_BIT;
+
+        if (vkCreateFence(window.device, &fenceCreateInfo, nullptr, &pipeline->computeFence) != VK_SUCCESS) {
+            LOG_ERROR("vkCreateFence failed\n");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline)
+{
+    vkDestroyFence(device, pipeline->computeFence, nullptr);
+    vkDestroyPipeline(device, pipeline->computePipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipeline->computePipelineLayout, nullptr);
+    vkDestroyDescriptorPool(device, pipeline->computeDescriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, pipeline->computeDescriptorSetLayout, nullptr);
+    DestroyVulkanImage(device, &pipeline->computeImage);
+    DestroyVulkanBuffer(device, &pipeline->computeUniform);
+    DestroyVulkanBuffer(device, &pipeline->computeBvhs);
+    DestroyVulkanBuffer(device, &pipeline->computeTriangles);
+    vkDestroyCommandPool(device, pipeline->computeCommandPool, nullptr);
 }

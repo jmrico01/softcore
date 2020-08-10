@@ -16,46 +16,13 @@
 
 #define DISCRETE_GPU 1
 
-struct ComputeMaterial
-{
-    Vec3 albedo;
-    float32 smoothness;
-    Vec3 emissionColor;
-    float32 emission;
-};
-
-struct ComputeBvh
-{
-	Vec3 aabbMin;
-	uint32 child1;
-	Vec3 aabbMax;
-	uint32 child2;
-	uint32 startTriangle;
-	uint32 endTriangle;
-    uint32 pad[2];
-};
-static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
-
-struct ComputeTriangle
-{
-    alignas(16) Vec3 a;
-    alignas(16) Vec3 b;
-    alignas(16) Vec3 c;
-    alignas(16) Vec3 normal;
-    uint32 materialIndex;
-};
-static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
-
-struct ComputeUbo
-{
-    const static uint32 MAX_MATERIALS = 32;
-
-	alignas(16) Vec3 cameraPos;
-	alignas(16) Vec3 filmTopLeft;
-	alignas(16) Vec3 filmUnitOffsetX;
-	alignas(16) Vec3 filmUnitOffsetY;
-	alignas(16) ComputeMaterial materials[MAX_MATERIALS];
-};
+// Required for platform main
+const char* WINDOW_NAME = "softcore";
+const int WINDOW_START_WIDTH  = 1024;
+const int WINDOW_START_HEIGHT = 768;
+const bool WINDOW_LOCK_CURSOR = true;
+const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
+const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
 
 struct StartSceneInfo
 {
@@ -92,15 +59,7 @@ const StartSceneInfo START_SCENE_INFOS[] = {
     },
 };
 
-const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[0];
-
-// Required for platform main
-const char* WINDOW_NAME = "softcore";
-const int WINDOW_START_WIDTH  = 1024;
-const int WINDOW_START_HEIGHT = 768;
-const bool WINDOW_LOCK_CURSOR = true;
-const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
-const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
+const StartSceneInfo START_SCENE_INFO = START_SCENE_INFOS[2];
 
 internal AppState* GetAppState(AppMemory* memory)
 {
@@ -159,19 +118,29 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
              scene.size, scene.data, geometry.meshes.size, totalTriangles);
     appState->raycastGeometry = geometry;
 
+    VulkanRaytracePipeline* raytracePipeline = &appState->vulkanAppState.raytracePipeline;
     VulkanMeshPipeline* meshPipeline = &appState->vulkanAppState.meshPipeline;
     VulkanCompositePipeline* compositePipeline = &appState->vulkanAppState.compositePipeline;
 
     UnloadCompositePipelineSwapchain(window.device, compositePipeline);
     UnloadMeshPipelineSwapchain(window.device, meshPipeline);
+
     UnloadCompositePipelineWindow(window.device, compositePipeline);
     UnloadMeshPipelineWindow(window.device, meshPipeline);
+
+    UnloadRaytracePipeline(window.device, raytracePipeline);
+
+    if (!LoadRaytracePipeline(window, commandPool, WINDOW_START_WIDTH, WINDOW_START_HEIGHT, geometry,
+                              allocator, raytracePipeline)) {
+        LOG_ERROR("Failed to reload Vulkan raytrace pipeline\n");
+        return false;
+    }
 
     if (!LoadMeshPipelineWindow(window, commandPool, obj, allocator, meshPipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
-    if (!LoadCompositePipelineWindow(window, commandPool, obj, allocator, compositePipeline)) {
+    if (!LoadCompositePipelineWindow(window, commandPool, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
     }
@@ -181,7 +150,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     }
 
     // const VkImageView rasterizedImageView = meshPipeline->colorImage.view;
-    const VkImageView rasterizedImageView = appState->vulkanAppState.computeImage.view;
+    const VkImageView rasterizedImageView = raytracePipeline->computeImage.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
@@ -234,8 +203,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         {
             LinearAllocator allocator(transientState->scratch);
 
-            LoadScene(START_SCENE_INFO.scene, appState, &allocator, vulkanState.window, vulkanState.swapchain,
-                      appState->vulkanAppState.commandPool);
+            if (!LoadScene(START_SCENE_INFO.scene, appState, &allocator, vulkanState.window, vulkanState.swapchain,
+                           appState->vulkanAppState.commandPool)) {
+                DEBUG_PANIC("Failed to load start scene\n");
+            }
         }
 
         // Debug views 
@@ -532,13 +503,14 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
     // Compute pipeline raytracing
     {
-        const VulkanAppState& vulkanAppState = appState->vulkanAppState;
-
         LinearAllocator allocator(transientState->scratch);
 
+        const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
         const RaycastGeometry& geometry = appState->raycastGeometry;
 
         ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
+        computeUbo->numTopLevelBvhs = raytracePipeline.numBvhs;
+
         {
             const uint32 width = screenSize.x;
             const uint32 height = screenSize.y;
@@ -578,9 +550,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
 
         void* data;
-        vkMapMemory(vulkanState.window.device, vulkanAppState.computeUniform.memory, 0, sizeof(ComputeUbo), 0, &data);
+        vkMapMemory(vulkanState.window.device, raytracePipeline.computeUniform.memory, 0, sizeof(ComputeUbo), 0, &data);
         MemCopy(data, computeUbo, sizeof(ComputeUbo));
-        vkUnmapMemory(vulkanState.window.device, vulkanAppState.computeUniform.memory);
+        vkUnmapMemory(vulkanState.window.device, raytracePipeline.computeUniform.memory);
 
 		VkSubmitInfo submitInfo = {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -588,93 +560,21 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         submitInfo.pWaitSemaphores = nullptr;
         submitInfo.pWaitDstStageMask = nullptr;
 		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &vulkanAppState.computeCommandBuffer;
+		submitInfo.pCommandBuffers = &raytracePipeline.computeCommandBuffer;
         submitInfo.signalSemaphoreCount = 0;
         submitInfo.pSignalSemaphores = nullptr;
 
-		if (vkQueueSubmit(vulkanAppState.computeQueue, 1, &submitInfo, vulkanAppState.computeFence) != VK_SUCCESS) {
+		if (vkQueueSubmit(raytracePipeline.computeQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
             LOG_ERROR("vkQueueSubmit failed\n");
         }
 
-        if (vkWaitForFences(vulkanState.window.device, 1, &vulkanAppState.computeFence,
-                            VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.computeFence, VK_TRUE,
+                            UINT64_MAX) != VK_SUCCESS) {
             LOG_ERROR("vkWaitForFences failed\n");
         }
-        if (vkResetFences(vulkanState.window.device, 1, &vulkanAppState.computeFence) != VK_SUCCESS) {
+        if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.computeFence) != VK_SUCCESS) {
             LOG_ERROR("vkResetFences failed\n");
         }
-    }
-
-    {
-        LinearAllocator allocator(transientState->scratch);
-
-        const VulkanCompositePipeline& compositePipeline = appState->vulkanAppState.compositePipeline;
-        const RaycastGeometry& geometry = appState->raycastGeometry;
-
-        CompositeUniformBufferObject* compositeUbo = allocator.New<CompositeUniformBufferObject>();
-        {
-            const uint32 width = screenSize.x;
-            const uint32 height = screenSize.y;
-            const Vec3 cameraPos = appState->cameraPos;
-
-            // TODO copy-pasted from raytracer.cpp for now
-            const Quat inverseCameraRot = Inverse(cameraRot);
-            const Vec3 cameraUp2 = inverseCameraRot * Vec3::unitZ;
-            const Vec3 cameraForward2 = inverseCameraRot * Vec3::unitX;
-            const Vec3 cameraLeft2 = inverseCameraRot * Vec3::unitY;
-
-            const float32 filmDist = 1.0f;
-            const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
-            const float32 filmWidth = filmHeight * (float32)width / (float32)height;
-
-            compositeUbo->filmTopLeft = cameraPos + cameraForward2 * filmDist
-                + (filmWidth / 2.0f + -0.136f) * cameraUp2 + (filmHeight / 2.0f + 0.136f) * cameraLeft2;
-            compositeUbo->filmUnitOffsetX = -cameraLeft2 * filmWidth / (float32)(width - 1);
-            compositeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
-            compositeUbo->cameraPos = cameraPos;
-        }
-
-        uint32 numMaterials = 0;
-        for (uint32 i = 0; i < geometry.materials.size; i++) {
-            const RaycastMaterial& srcMaterial = geometry.materials[i];
-            CompositeMaterial* dstMaterial = &compositeUbo->materials[numMaterials++];
-
-            dstMaterial->albedo = srcMaterial.albedo;
-            dstMaterial->smoothness = srcMaterial.smoothness;
-            dstMaterial->emissionColor = srcMaterial.emissionColor;
-            dstMaterial->emission = srcMaterial.emission;
-
-            if (numMaterials >= CompositeUniformBufferObject::MAX_MATERIALS) {
-                break;
-            }
-        }
-
-        // TODO this is only for counting triangles now. should do this when creating the pipeline
-        // number of triangles could easily be made a shader constant
-        DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(&allocator);
-        compositeUbo->numTriangles = 0;
-        for (uint32 i = 0; i < geometry.meshes.size; i++) {
-            bvhStack.Clear();
-            bvhStack.Append(&geometry.meshes[i].bvh);
-            while (bvhStack.size > 0) {
-                const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
-                bvhStack.RemoveLast();
-
-                if (bvh->child1 == nullptr) {
-                    compositeUbo->numTriangles += bvh->triangles.size;
-                }
-                else {
-                    bvhStack.Append(bvh->child1);
-                    bvhStack.Append(bvh->child2);
-                }
-            }
-        }
-
-        void* data;
-        vkMapMemory(vulkanState.window.device, compositePipeline.uniformBuffer.memory, 0,
-                    sizeof(CompositeUniformBufferObject), 0, &data);
-        MemCopy(data, compositeUbo, sizeof(CompositeUniformBufferObject));
-        vkUnmapMemory(vulkanState.window.device, compositePipeline.uniformBuffer.memory);
     }
 
     // Vulkan rendering
@@ -726,7 +626,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     imageCopy.extent.height = screenSize.y;
     imageCopy.extent.depth = 1;
 
-    TransitionImageLayout(buffer, appState->vulkanAppState.computeImage.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.computeImage.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
@@ -787,7 +687,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     vkCmdEndRenderPass(buffer);
 
     // TODO uhhhh
-    TransitionImageLayout(buffer, appState->vulkanAppState.computeImage.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.computeImage.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
     if (vkEndCommandBuffer(buffer) != VK_SUCCESS) {
@@ -839,23 +739,6 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
         SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
         TransitionImageLayout(commandBuffer, app->image,
                               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
-#if 0
-        if (!CreateImage(window.device, window.physicalDevice, swapchain.extent.width, swapchain.extent.height,
-                         VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_TILING_OPTIMAL,
-                         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         &app->imageSampled.image, &app->imageSampled.memory)) {
-            LOG_ERROR("CreateImage failed\n");
-            return false;
-        }
-
-        if (!CreateImageView(window.device, app->imageSampled.image, VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_ASPECT_COLOR_BIT,
-                             &app->imageSampled.view)) {
-            LOG_ERROR("CreateImageView failed\n");
-            return false;
-        }
-#endif
     }
 
     if (!LoadMeshPipelineSwapchain(window, swapchain, app->commandPool, &allocator, &app->meshPipeline)) {
@@ -864,7 +747,7 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
     }
 
     // const VkImageView rasterizedImageView = app->meshPipeline.colorImage.view;
-    const VkImageView rasterizedImageView = app->computeImage.view;
+    const VkImageView rasterizedImageView = app->raytracePipeline.computeImage.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, &allocator, &app->compositePipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan composite pipeline\n");
         return false;
@@ -909,18 +792,6 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
     VulkanAppState* app = &appState->vulkanAppState;
     TransientState* transientState = GetTransientState(memory);
     LinearAllocator allocator(transientState->scratch);
-
-    LoadObjResult obj;
-    if (!LoadSceneObj(START_SCENE_INFO.scene, &allocator, &obj)) {
-        LOG_ERROR("Failed to load obj file for scene %.*s\n", START_SCENE_INFO.scene.size, START_SCENE_INFO.scene.data);
-        return false;
-    }
-
-    RaycastGeometry geometry = CreateRaycastGeometry(obj, UINT32_MAX_VALUE, &allocator, &allocator);
-    if (geometry.meshes.data == nullptr) {
-        LOG_ERROR("Failed to load geometry from obj\n");
-        return false;
-    }
 
     QueueFamilyInfo queueFamilyInfo = GetQueueFamilyInfo(window.surface, window.physicalDevice, &allocator);
     if (!queueFamilyInfo.hasComputeFamily) {
@@ -967,419 +838,40 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
         }
     }
 
-    // Create compute resources
-    {
-        const uint32 imageWidth = WINDOW_START_WIDTH;
-        const uint32 imageHeight = WINDOW_START_HEIGHT;
-
-        // compute queue and command pool
-        {
-            VkDeviceQueueCreateInfo queueCreateInfo = {};
-            queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-            queueCreateInfo.pNext = nullptr;
-            queueCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
-            queueCreateInfo.queueCount = 1;
-            vkGetDeviceQueue(window.device, queueFamilyInfo.computeFamilyIndex, 0, &app->computeQueue);
-
-            VkCommandPoolCreateInfo commandPoolCreateInfo = {};
-            commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-            commandPoolCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
-            commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-
-            if (vkCreateCommandPool(window.device, &commandPoolCreateInfo, nullptr,
-                                    &app->computeCommandPool) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateCommandPool failed\n");
-                return false;
-            }
-        }
-
-        // triangles and BVHs
-        {
-            DynamicArray<ComputeTriangle, LinearAllocator> triangles(&allocator);
-            DynamicArray<ComputeBvh, LinearAllocator> bvhs(&allocator);
-            DynamicArray<RaycastMeshBvh, LinearAllocator> bvhStack(&allocator);
-
-            for (uint32 i = 0; i < geometry.meshes.size; i++) {
-                const RaycastMesh& mesh = geometry.meshes[i];
-                if (mesh.numTriangles != mesh.bvh.triangles.size) {
-                    LOG_ERROR("BVH structure, expected flat\n");
-                    return false;
-                }
-
-                const RaycastMeshBvh& srcBvh = mesh.bvh;
-                ComputeBvh* dstBvh = bvhs.Append();
-                dstBvh->aabbMin = srcBvh.aabb.min;
-                dstBvh->aabbMax = srcBvh.aabb.max;
-                dstBvh->child1 = 0;
-                dstBvh->child2 = 0;
-                dstBvh->startTriangle = triangles.size;
-                dstBvh->endTriangle = triangles.size + srcBvh.triangles.size;
-
-                for (uint32 j = 0; j < srcBvh.triangles.size; j++) {
-                    const RaycastTriangle& srcTriangle = srcBvh.triangles[j];
-                    ComputeTriangle* dstTriangle = triangles.Append();
-                    dstTriangle->a = srcTriangle.pos[0];
-                    dstTriangle->b = srcTriangle.pos[1];
-                    dstTriangle->c = srcTriangle.pos[2];
-                    dstTriangle->normal = srcTriangle.normal;
-                    dstTriangle->materialIndex = srcTriangle.materialIndex;
-                }
-            }
-
-            const VkDeviceSize triangleBufferSize = triangles.size * sizeof(ComputeTriangle);
-            const VkDeviceSize bvhBufferSize = bvhs.size * sizeof(ComputeBvh);
-            app->numTriangles = triangles.size;
-            app->numBvhs = bvhs.size;
-
-            const VkDeviceSize stagingBufferSize = MaxUInt64(triangleBufferSize, bvhBufferSize);
-            VulkanBuffer stagingBuffer;
-            if (!CreateVulkanBuffer(stagingBufferSize,
-                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                    window.device, window.physicalDevice, &stagingBuffer)) {
-                LOG_ERROR("CreateVulkanBuffer failed\n");
-                return false;
-            }
-            defer(DestroyVulkanBuffer(window.device, &stagingBuffer));
-            void* data;
-
-            // Create triangle storage buffer
-            if (!CreateVulkanBuffer(triangleBufferSize,
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                    window.device, window.physicalDevice, &app->computeTriangles)) {
-                LOG_ERROR("CreateVulkanBuffer failed\n");
-                return false;
-            }
-
-            // Copy triangle data to staging buffer
-            vkMapMemory(window.device, stagingBuffer.memory, 0, triangleBufferSize, 0, &data);
-            MemCopy(data, triangles.data, triangleBufferSize);
-            vkUnmapMemory(window.device, stagingBuffer.memory);
-
-            // Copy triangle data to final storage buffer
-            {
-                SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
-                CopyBuffer(commandBuffer, stagingBuffer.buffer, app->computeTriangles.buffer, triangleBufferSize);
-            }
-
-            // Create bvh storage buffer
-            if (!CreateVulkanBuffer(bvhBufferSize,
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                    window.device, window.physicalDevice, &app->computeBvhs)) {
-                LOG_ERROR("CreateVulkanBuffer failed\n");
-                return false;
-            }
-
-            // Copy triangle data to staging buffer
-            vkMapMemory(window.device, stagingBuffer.memory, 0, bvhBufferSize, 0, &data);
-            MemCopy(data, bvhs.data, bvhBufferSize);
-            vkUnmapMemory(window.device, stagingBuffer.memory);
-
-            // Copy triangle data to final storage buffer
-            {
-                SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
-                CopyBuffer(commandBuffer, stagingBuffer.buffer, app->computeBvhs.buffer, bvhBufferSize);
-            }
-        }
-
-        // uniform buffer
-        {
-            const VkDeviceSize uniformBufferSize = sizeof(ComputeUbo);
-            if (!CreateVulkanBuffer(uniformBufferSize,
-                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                    window.device, window.physicalDevice, &app->computeUniform)) {
-                LOG_ERROR("CreateBuffer failed for vertex buffer\n");
-                return false;
-            }
-        }
-
-        // image
-        {
-            const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
-            VkFormatProperties formatProperties;
-            vkGetPhysicalDeviceFormatProperties(window.physicalDevice, format, &formatProperties);
-            if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
-                LOG_ERROR("Storage image unsupported for format %d\n", format);
-                return false;
-            }
-
-            if (!CreateImage(window.device, window.physicalDevice, imageWidth, imageHeight, format,
-                             VK_IMAGE_TILING_OPTIMAL,
-                             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                             &app->computeImage.image, &app->computeImage.memory)) {
-                LOG_ERROR("CreateImage failed\n");
-                return false;
-            }
-
-            if (!CreateImageView(window.device, app->computeImage.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
-                                 &app->computeImage.view)) {
-                LOG_ERROR("CreateImageView failed\n");
-                return false;
-            }
-
-            SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
-            TransitionImageLayout(commandBuffer, app->computeImage.image,
-                                  VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
-        }
-
-        // descriptor set layout
-        {
-            VkDescriptorSetLayoutBinding layoutBindings[4] = {};
-
-            layoutBindings[0].binding = 0;
-            layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            layoutBindings[0].descriptorCount = 1;
-            layoutBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            layoutBindings[0].pImmutableSamplers = nullptr;
-
-            layoutBindings[1].binding = 1;
-            layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            layoutBindings[1].descriptorCount = 1;
-            layoutBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            layoutBindings[1].pImmutableSamplers = nullptr;
-
-            layoutBindings[2].binding = 2;
-            layoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            layoutBindings[2].descriptorCount = 1;
-            layoutBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            layoutBindings[2].pImmutableSamplers = nullptr;
-
-            layoutBindings[3].binding = 3;
-            layoutBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            layoutBindings[3].descriptorCount = 1;
-            layoutBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            layoutBindings[3].pImmutableSamplers = nullptr;
-
-            VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
-            layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layoutCreateInfo.bindingCount = C_ARRAY_LENGTH(layoutBindings);
-            layoutCreateInfo.pBindings = layoutBindings;
-
-            if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
-                                            &app->computeDescriptorSetLayout) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateDescriptorSetLayout failed\n");
-                return false;
-            }
-        }
-
-        // descriptor pool
-        {
-            VkDescriptorPoolSize poolSizes[3] = {};
-
-            poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            poolSizes[0].descriptorCount = 1;
-
-            poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            poolSizes[1].descriptorCount = 1;
-
-            poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            poolSizes[2].descriptorCount = 2;
-
-            VkDescriptorPoolCreateInfo poolInfo = {};
-            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-            poolInfo.poolSizeCount = C_ARRAY_LENGTH(poolSizes);
-            poolInfo.pPoolSizes = poolSizes;
-            poolInfo.maxSets = 1;
-
-            if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &app->computeDescriptorPool) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateDescriptorPool failed\n");
-                return false;
-            }
-        }
-
-        // descriptor set
-        {
-            VkDescriptorSetAllocateInfo allocInfo = {};
-            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            allocInfo.descriptorPool = app->computeDescriptorPool;
-            allocInfo.descriptorSetCount = 1;
-            allocInfo.pSetLayouts = &app->computeDescriptorSetLayout;
-
-            if (vkAllocateDescriptorSets(window.device, &allocInfo, &app->computeDescriptorSet) != VK_SUCCESS) {
-                LOG_ERROR("vkAllocateDescriptorSets failed\n");
-                return false;
-            }
-
-            VkWriteDescriptorSet descriptorWrites[4] = {};
-
-            const VkDescriptorImageInfo imageInfo = {
-                .sampler = VK_NULL_HANDLE,
-                .imageView = app->computeImage.view,
-                .imageLayout = VK_IMAGE_LAYOUT_GENERAL
-            };
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = app->computeDescriptorSet;
-            descriptorWrites[0].dstBinding = 0;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pImageInfo = &imageInfo;
-
-            const VkDescriptorBufferInfo uniformBufferInfo = {
-                .buffer = app->computeUniform.buffer,
-                .offset = 0,
-                .range = sizeof(ComputeUbo),
-            };
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = app->computeDescriptorSet;
-            descriptorWrites[1].dstBinding = 1;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pBufferInfo = &uniformBufferInfo;
-
-            const VkDescriptorBufferInfo triangleBufferInfo = {
-                .buffer = app->computeTriangles.buffer,
-                .offset = 0,
-                .range = app->numTriangles * sizeof(ComputeTriangle),
-            };
-            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[2].dstSet = app->computeDescriptorSet;
-            descriptorWrites[2].dstBinding = 2;
-            descriptorWrites[2].dstArrayElement = 0;
-            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[2].descriptorCount = 1;
-            descriptorWrites[2].pBufferInfo = &triangleBufferInfo;
-
-            const VkDescriptorBufferInfo bvhBufferInfo = {
-                .buffer = app->computeBvhs.buffer,
-                .offset = 0,
-                .range = app->numBvhs * sizeof(ComputeBvh),
-            };
-            descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[3].dstSet = app->computeDescriptorSet;
-            descriptorWrites[3].dstBinding = 3;
-            descriptorWrites[3].dstArrayElement = 0;
-            descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            descriptorWrites[3].descriptorCount = 1;
-            descriptorWrites[3].pBufferInfo = &bvhBufferInfo;
-
-            vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
-        }
-
-        // pipeline
-        {
-            const Array<uint8> shaderCode = LoadEntireFile(ToString("data/shaders/raytrace.comp.spv"), &allocator);
-            if (shaderCode.data == nullptr) {
-                LOG_ERROR("Failed to load compute shader code\n");
-                return false;
-            }
-
-            VkShaderModule shaderModule;
-            if (!CreateShaderModule(shaderCode, window.device, &shaderModule)) {
-                LOG_ERROR("Failed to create compute shader module\n");
-                return false;
-            }
-            defer(vkDestroyShaderModule(window.device, shaderModule, nullptr));
-
-            VkPipelineShaderStageCreateInfo shaderStageCreateInfo = {};
-            shaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            shaderStageCreateInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-            shaderStageCreateInfo.module = shaderModule;
-            shaderStageCreateInfo.pName = "main";
-
-            VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
-            pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipelineLayoutCreateInfo.setLayoutCount = 1;
-            pipelineLayoutCreateInfo.pSetLayouts = &app->computeDescriptorSetLayout;
-            pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
-            pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
-
-            if (vkCreatePipelineLayout(window.device, &pipelineLayoutCreateInfo, nullptr,
-                                       &app->computePipelineLayout) != VK_SUCCESS) {
-                LOG_ERROR("vkCreatePipelineLayout failed\n");
-                return false;
-            }
-
-            VkComputePipelineCreateInfo pipelineCreateInfo = {};
-            pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-            pipelineCreateInfo.pNext = nullptr;
-            pipelineCreateInfo.flags = 0;
-            pipelineCreateInfo.stage = shaderStageCreateInfo;
-            pipelineCreateInfo.layout = app->computePipelineLayout;
-
-            if (vkCreateComputePipelines(window.device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr,
-                                         &app->computePipeline) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateComputePipelines failed\n");
-                return false;
-            }
-        }
-
-        // command buffer
-        {
-            VkCommandBufferAllocateInfo allocInfo = {};
-            allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            allocInfo.pNext = nullptr;
-            allocInfo.commandPool = app->computeCommandPool;
-            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            allocInfo.commandBufferCount = 1;
-
-            if (vkAllocateCommandBuffers(window.device, &allocInfo, &app->computeCommandBuffer) != VK_SUCCESS) {
-                LOG_ERROR("vkAllocateCommandBuffers failed\n");
-                return false;
-            }
-
-            VkCommandBufferBeginInfo beginInfo = {};
-            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            beginInfo.flags = 0;
-            beginInfo.pInheritanceInfo = nullptr;
-
-            if (vkBeginCommandBuffer(app->computeCommandBuffer, &beginInfo) != VK_SUCCESS) {
-                LOG_ERROR("vkBeginCommandBuffer failed\n");
-                return false;
-            }
-
-            vkCmdBindPipeline(app->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, app->computePipeline);
-            vkCmdBindDescriptorSets(app->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                    app->computePipelineLayout, 0, 1, &app->computeDescriptorSet, 0, 0);
-
-            const uint32 batchSize = VulkanAppState::BATCH_SIZE;
-            vkCmdDispatch(app->computeCommandBuffer, imageWidth / batchSize, imageHeight / batchSize, 1);
-
-            if (vkEndCommandBuffer(app->computeCommandBuffer) != VK_SUCCESS) {
-                LOG_ERROR("vkEndCommandBuffer failed\n");
-                return false;
-            }
-        }
-
-        // fence
-        {
-            VkFenceCreateInfo fenceCreateInfo = {};
-            fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            fenceCreateInfo.flags = 0;//VK_FENCE_CREATE_SIGNALED_BIT;
-
-            if (vkCreateFence(window.device, &fenceCreateInfo, nullptr, &app->computeFence) != VK_SUCCESS) {
-                LOG_ERROR("vkCreateFence failed\n");
-                return false;
-            }
-        }
+    LoadObjResult obj;
+    if (!LoadSceneObj(START_SCENE_INFO.scene, &allocator, &obj)) {
+        LOG_ERROR("Failed to load obj file for scene %.*s\n", START_SCENE_INFO.scene.size, START_SCENE_INFO.scene.data);
+        return false;
     }
 
-    const bool meshPipeline = LoadMeshPipelineWindow(window, app->commandPool, obj, &allocator, &app->meshPipeline);
-    if (!meshPipeline) {
+    RaycastGeometry geometry = CreateRaycastGeometry(obj, BOX_MAX_TRIANGLES, &allocator, &allocator);
+    if (geometry.meshes.data == nullptr) {
+        LOG_ERROR("Failed to load geometry from obj\n");
+        return false;
+    }
+
+    if (!LoadRaytracePipeline(window, app->commandPool, WINDOW_START_WIDTH, WINDOW_START_HEIGHT, geometry,
+                              &allocator, &app->raytracePipeline)) {
+        LOG_ERROR("Failed to load Vulkan raytrace pipeline\n");
+        return false;
+    }
+
+    if (!LoadMeshPipelineWindow(window, app->commandPool, obj, &allocator, &app->meshPipeline)) {
         LOG_ERROR("Failed to load window-dependent Vulkan mesh pipeline\n");
         return false;
     }
 
-    const bool compositePipeline = LoadCompositePipelineWindow(window, app->commandPool, obj, &allocator,
-                                                               &app->compositePipeline);
-    if (!compositePipeline) {
+    if (!LoadCompositePipelineWindow(window, app->commandPool, &allocator, &app->compositePipeline)) {
         LOG_ERROR("Failed to load window-dependent Vulkan composite pipeline\n");
         return false;
     }
 
-    const bool spritePipeline = LoadSpritePipelineWindow(window, app->commandPool, &allocator, &app->spritePipeline);
-    if (!spritePipeline) {
+    if (!LoadSpritePipelineWindow(window, app->commandPool, &allocator, &app->spritePipeline)) {
         LOG_ERROR("Failed to load window-dependent Vulkan sprite pipeline\n");
         return false;
     }
 
-    const bool textPipeline = LoadTextPipelineWindow(window, app->commandPool, &allocator, &app->textPipeline);
-    if (!textPipeline) {
+    if (!LoadTextPipelineWindow(window, app->commandPool, &allocator, &app->textPipeline)) {
         LOG_ERROR("Failed to load window-dependent Vulkan text pipeline\n");
         return false;
     }
@@ -1476,17 +968,7 @@ APP_UNLOAD_VULKAN_WINDOW_STATE_FUNCTION(AppUnloadVulkanWindowState)
     UnloadSpritePipelineWindow(device, &app->spritePipeline);
     UnloadCompositePipelineWindow(device, &app->compositePipeline);
     UnloadMeshPipelineWindow(device, &app->meshPipeline);
-
-    vkDestroyFence(device, app->computeFence, nullptr);
-    vkDestroyPipeline(device, app->computePipeline, nullptr);
-    vkDestroyPipelineLayout(device, app->computePipelineLayout, nullptr);
-    vkDestroyDescriptorPool(device, app->computeDescriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, app->computeDescriptorSetLayout, nullptr);
-    DestroyVulkanImage(device, &app->computeImage);
-    DestroyVulkanBuffer(device, &app->computeUniform);
-    DestroyVulkanBuffer(device, &app->computeBvhs);
-    DestroyVulkanBuffer(device, &app->computeTriangles);
-    vkDestroyCommandPool(device, app->computeCommandPool, nullptr);
+    UnloadRaytracePipeline(device, &app->raytracePipeline);
 
     vkDestroyFence(device, app->fence, nullptr);
     vkDestroyCommandPool(device, app->commandPool, nullptr);
