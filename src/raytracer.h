@@ -112,6 +112,7 @@ struct VulkanRaytracePipeline
 {
     const static uint32 BATCH_SIZE = 16;
 
+    // compute version
     VkQueue computeQueue;
     VkCommandPool computeCommandPool;
 
@@ -132,6 +133,24 @@ struct VulkanRaytracePipeline
 
     VkCommandBuffer computeCommandBuffer;
     VkFence computeFence;
+
+    // fragment version
+    VulkanBuffer vertexBuffer;
+
+    VkRenderPass renderPass;
+
+    VulkanImage image;
+    VkFramebuffer framebuffer;
+
+    VkDescriptorSetLayout descriptorSetLayout;
+    VkDescriptorPool descriptorPool;
+    VkDescriptorSet descriptorSet;
+
+    VkPipelineLayout pipelineLayout;
+    VkPipeline pipeline;
+
+    VkCommandBuffer commandBuffer;
+    VkFence fence;
 };
 
 bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,
