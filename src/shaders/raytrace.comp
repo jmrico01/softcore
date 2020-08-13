@@ -1,5 +1,7 @@
 #version 450
 
+#define PI_F 3.14159265
+
 #define TILE_SIZE 16
 #define MAX_MATERIALS 16
 
@@ -98,7 +100,7 @@ float RandomBilateral(inout uint state)
 	return 2.0 * RandomUnilateral(state) - 1.0;
 }
 
-vec3 RandomInUnitSphere(inout uint state)
+vec3 RandomInsideUnitSphere(inout uint state)
 {
 	// TODO is this the best way, for a shader? maybe...
 	while (true) {
@@ -107,6 +109,14 @@ vec3 RandomInUnitSphere(inout uint state)
 			return p;
 		}
 	}
+}
+
+vec3 RandomInUnitSphereSurface(inout uint state)
+{
+	const float angle = RandomUnilateral(state) * 2.0 * PI_F;
+	const float z = RandomBilateral(state);
+	const float r = sqrt(1.0 - z * z);
+	return vec3(r * cos(angle), r * sin(angle), z);
 }
 
 vec3 RandomInHemisphereUnitX(inout uint state)
@@ -162,34 +172,43 @@ vec4 QuatFromAngleUnitAxis(float angle, vec3 axis)
 // Returns a quaternion for the rotation required to align unit X vector with unit vector reference
 vec4 QuatRotationFromUnitX(vec3 reference)
 {
-	const float dotRefUnitX = dot(vec3(1.0, 0.0, 0.0), reference);
-	if (dotRefUnitX > 0.99999f) {
+	const float dotUnitX = dot(vec3(1.0, 0.0, 0.0), reference);
+	if (dotUnitX > (1.0 - EPSILON)) {
 		return QUAT_ONE;
 	}
-	else if (dotRefUnitX < -0.99999f) {
+	else if (dotUnitX < (-1.0 + EPSILON)) {
 		// 180-degree rotation about y axis (perpendicular to x)
 		// comptime angle = PI, cosHalfAngle = 0, sinHalfAngle = 1, axis = 0.0, 1.0, 0.0
 		return vec4(0.0, 1.0, 0.0, 0.0);
 	}
 
-	const float angle = 1.0 + dotRefUnitX;
-	const vec3 unitAxis = normalize(cross(vec3(1.0, 0.0, 0.0), reference));
-	return QuatFromAngleUnitAxis(angle, unitAxis);
+	vec4 q;
+	const vec3 axis = cross(vec3(1.0, 0.0, 0.0), reference);
+	q.xyz = axis;
+	q.w = 1.0 + dotUnitX;
+	return normalize(q);
 }
 
 vec3 GetNewRayDirDiffuse(vec3 hitPos, vec3 hitNormal, inout uint randomState)
 {
-	return normalize(hitNormal + RandomInUnitSphere(randomState));
+	// return normalize(hitNormal + RandomInsideUnitSphere(randomState));
+	return normalize(hitNormal + RandomInUnitSphereSurface(randomState));
 }
 
 vec3 GetNewRayDirSpecular(vec3 rayDir, vec3 hitNormal, float smoothness, inout uint randomState)
 {
+	// TODO hmm... not conviced with this. I want smoothness=0 perfect diffuse, smoothness=1 perfect mirror
+	const float z = RandomUnilateral(randomState);
+	const float e = 1.0 / (smoothness * 1000.0 + 1.0);
+	const float gamma = acos(pow(z, e));
+	const float phi = RandomUnilateral(randomState) * 2.0 * PI_F;
 	const vec3 pureBounce = reflect(rayDir, hitNormal);
-	const vec3 randomDirUnitX = RandomInHemisphereUnitX(randomState);
-	const vec4 quatXToNormal = QuatRotationFromUnitX(hitNormal);
-	const vec3 randomBounce = QuatRotate(randomDirUnitX, quatXToNormal);
 
-	return normalize(mix(randomBounce, pureBounce, smoothness));
+	vec4 quat = QuatFromAngleUnitAxis(gamma, vec3(0.0, 0.0, 1.0));
+	quat = QuatMultiply(QuatFromAngleUnitAxis(phi, vec3(1.0, 0.0, 0.0)), quat);
+	quat = QuatMultiply(QuatRotationFromUnitX(pureBounce), quat);
+
+	return QuatRotate(vec3(1.0, 0.0, 0.0), quat);
 }
 
 // NOTE remember this takes in the INVERSE ray direction!
