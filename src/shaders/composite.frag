@@ -30,5 +30,6 @@ void main()
 	colorRaytraced += texture(raytracedColor, inUv + vec2(-pixelSize.x, 0.0)).rgb * nearbyBlend;
 
 	vec3 colorBlended = colorRasterized;// mix(colorRaytraced, colorRasterized.rgb, colorRasterized.a);
+
     outColor = vec4(colorBlended, 1.0);
 }

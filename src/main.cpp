@@ -16,8 +16,6 @@
 
 #define DISCRETE_GPU 1
 
-#define COMPUTE_SHADER 1
-
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
@@ -147,11 +145,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     }
 
     // const VkImageView rasterizedImageView = meshPipeline->colorImage.view;
-#if COMPUTE_SHADER
     const VkImageView rasterizedImageView = raytracePipeline->computeImage.view;
-#else
-    const VkImageView rasterizedImageView = raytracePipeline->image.view;
-#endif
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
@@ -578,23 +572,13 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         submitInfo.pWaitSemaphores = nullptr;
         submitInfo.pWaitDstStageMask = nullptr;
         submitInfo.commandBufferCount = 1;
-#if COMPUTE_SHADER
         submitInfo.pCommandBuffers = &raytracePipeline.computeCommandBuffer;
-#else
-        submitInfo.pCommandBuffers = &raytracePipeline.commandBuffer;
-#endif
         submitInfo.signalSemaphoreCount = 0;
         submitInfo.pSignalSemaphores = nullptr;
 
-#if COMPUTE_SHADER
         if (vkQueueSubmit(raytracePipeline.computeQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
             LOG_ERROR("vkQueueSubmit failed\n");
         }
-#else
-        if (vkQueueSubmit(vulkanState.window.graphicsQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
-            LOG_ERROR("vkQueueSubmit failed\n");
-        }
-#endif
 
         if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.computeFence, VK_TRUE,
                             UINT64_MAX) != VK_SUCCESS) {
@@ -775,11 +759,7 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
     }
 
     // const VkImageView rasterizedImageView = app->meshPipeline.colorImage.view;
-#if COMPUTE_SHADER
     const VkImageView rasterizedImageView = app->raytracePipeline.computeImage.view;
-#else
-    const VkImageView rasterizedImageView = app->raytracePipeline.image.view;
-#endif
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, &allocator, &app->compositePipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan composite pipeline\n");
         return false;

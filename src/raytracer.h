@@ -37,7 +37,7 @@ static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
 
 struct ComputeUbo
 {
-    const static uint32 MAX_MATERIALS = 32;
+    const static uint32 MAX_MATERIALS = 16;
 
 	alignas(16) Vec3 cameraPos;
     uint32 seed;
@@ -133,24 +133,6 @@ struct VulkanRaytracePipeline
 
     VkCommandBuffer computeCommandBuffer;
     VkFence computeFence;
-
-    // fragment version
-    VulkanBuffer vertexBuffer;
-
-    VkRenderPass renderPass;
-
-    VulkanImage image;
-    VkFramebuffer framebuffer;
-
-    VkDescriptorSetLayout descriptorSetLayout;
-    VkDescriptorPool descriptorPool;
-    VkDescriptorSet descriptorSet;
-
-    VkPipelineLayout pipelineLayout;
-    VkPipeline pipeline;
-
-    VkCommandBuffer commandBuffer;
-    VkFence fence;
 };
 
 bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,

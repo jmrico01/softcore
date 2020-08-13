@@ -7,12 +7,6 @@
 #include <Tracy.hpp>
 #include <TracyC.h>
 
-struct VulkanScreenQuadVertex
-{
-    Vec2 pos;
-    Vec2 uv;
-};
-
 struct RandomSeries
 {
     uint32 state;
@@ -54,33 +48,33 @@ bool GetMaterial(const_string name, RaycastMaterial* material)
 {
     if (StringEquals(name, ToString("Surfaces"))) {
         material->smoothness = 0.8f;
-        material->albedo = Vec3 { 1.0f, 1.0f, 1.0f };
+        material->albedo = Vec3 { 151.0f, 162.0f, 176.0f } / 255.0f;
         material->emission = 0.0f;
         material->emissionColor = Vec3::zero;
     }
     else if (StringEquals(name, ToString("LightHardGreen"))) {
         material->smoothness = 0.0f;
-        material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->albedo = Vec3::zero;
         material->emission = 1.5f;
         material->emissionColor = Vec3 { 0, 255, 129 } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightSoftGreen"))) {
         material->smoothness = 0.0f;
-        material->albedo = Vec3 { 0.0f, 1.0f, 0.42f };
+        material->albedo = Vec3::zero;
         material->emission = 1.0f;
         material->emissionColor = Vec3 { 0, 255, 129 } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightPink"))) {
         material->smoothness = 0.0f;
-        material->albedo = Vec3 { 0.9294f, 0.651f, 1.0f };
+        material->albedo = Vec3::zero;
         material->emission = 1.0f;
-        material->emissionColor = Vec3 { 0.9294f, 0.651f, 1.0f };
+        material->emissionColor = Vec3 { 237.0f, 166.0f, 255.0f } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightRed"))) {
         material->smoothness = 0.0f;
-        material->albedo = Vec3 { 1.0f, 0.0f, 0.082f };
-        material->emission = 1.5f;
-        material->emissionColor = Vec3 { 1.0f, 0.0f, 0.082f };
+        material->albedo = Vec3::zero;
+        material->emission = 4.0f;
+        material->emissionColor = Vec3 { 255.0f, 0.0f, 21.0f } / 255.0f;
     }
     else {
         return false;
@@ -783,7 +777,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
     // image
     {
-        const VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+        const VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT;
         VkFormatProperties formatProperties;
         vkGetPhysicalDeviceFormatProperties(window.physicalDevice, format, &formatProperties);
         if ((formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) == 0) {
@@ -1043,506 +1037,11 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         }
     }
 
-    // FRAGMENT VERSION ===========================================================================
-
-    // Create vertex buffer
-    {
-        const VulkanScreenQuadVertex VERTICES[] = {
-            { { -1.0f, -1.0f }, { 0.0f, 0.0f } },
-            { {  1.0f, -1.0f }, { 1.0f, 0.0f } },
-            { {  1.0f,  1.0f }, { 1.0f, 1.0f } },
-
-            { {  1.0f,  1.0f }, { 1.0f, 1.0f } },
-            { { -1.0f,  1.0f }, { 0.0f, 1.0f } },
-            { { -1.0f, -1.0f }, { 0.0f, 0.0f } },
-        };
-
-        const VkDeviceSize vertexBufferSize = C_ARRAY_LENGTH(VERTICES) * sizeof(VulkanScreenQuadVertex);
-
-        VulkanBuffer stagingBuffer;
-        if (!CreateVulkanBuffer(vertexBufferSize,
-                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                window.device, window.physicalDevice, &stagingBuffer)) {
-            LOG_ERROR("CreateBuffer failed for staging buffer\n");
-            return false;
-        }
-
-        // Copy vertex data from CPU into memory-mapped staging buffer
-        void* data;
-        vkMapMemory(window.device, stagingBuffer.memory, 0, vertexBufferSize, 0, &data);
-
-        MemCopy(data, VERTICES, vertexBufferSize);
-
-        vkUnmapMemory(window.device, stagingBuffer.memory);
-
-        if (!CreateVulkanBuffer(vertexBufferSize,
-                                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                window.device, window.physicalDevice,
-                                &pipeline->vertexBuffer)) {
-            LOG_ERROR("CreateBuffer failed for vertex buffer\n");
-            return false;
-        }
-
-        // Copy vertex data from staging buffer into GPU vertex buffer
-        VkCommandBuffer commandBuffer = BeginOneTimeCommands(window.device, commandPool);
-        CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->vertexBuffer.buffer, vertexBufferSize);
-        EndOneTimeCommands(window.device, commandPool, window.graphicsQueue, commandBuffer);
-
-        DestroyVulkanBuffer(window.device, &stagingBuffer);
-    }
-
-    // Create render pass
-    {
-        VkAttachmentDescription attachments[1] = {};
-
-        // Attachment 0 - color
-        attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
-        attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
-        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[0].finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        VkAttachmentReference colorAttachmentRefs[1] = {};
-        colorAttachmentRefs[0].attachment = 0;
-        colorAttachmentRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass = {};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = C_ARRAY_LENGTH(colorAttachmentRefs);
-        subpass.pColorAttachments = colorAttachmentRefs;
-        subpass.pDepthStencilAttachment = nullptr;
-
-        VkSubpassDependency dependency = {};
-        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo renderPassCreateInfo = {};
-        renderPassCreateInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        renderPassCreateInfo.attachmentCount = C_ARRAY_LENGTH(attachments);
-        renderPassCreateInfo.pAttachments = attachments;
-        renderPassCreateInfo.subpassCount = 1;
-        renderPassCreateInfo.pSubpasses = &subpass;
-        renderPassCreateInfo.dependencyCount = 1;
-        renderPassCreateInfo.pDependencies = &dependency;
-
-        if (vkCreateRenderPass(window.device, &renderPassCreateInfo, nullptr, &pipeline->renderPass) != VK_SUCCESS) {
-            LOG_ERROR("vkCreateRenderPass failed\n");
-            return false;
-        }
-    }
-
-    // Create color attachments
-    {
-        if (!CreateImage(window.device, window.physicalDevice, width, height,
-                         VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         &pipeline->image.image, &pipeline->image.memory)) {
-            LOG_ERROR("CreateImage failed\n");
-            return false;
-        }
-
-        if (!CreateImageView(window.device, pipeline->image.image, VK_FORMAT_R8G8B8A8_UNORM,
-                             VK_IMAGE_ASPECT_COLOR_BIT, &pipeline->image.view)) {
-            LOG_ERROR("CreateImageView failed\n");
-            return false;
-        }
-    }
-
-    // Create framebuffers
-    {
-        const VkImageView attachments[] = {
-            pipeline->image.view,
-        };
-
-        VkFramebufferCreateInfo framebufferCreateInfo = {};
-        framebufferCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferCreateInfo.renderPass = pipeline->renderPass;
-        framebufferCreateInfo.attachmentCount = C_ARRAY_LENGTH(attachments);
-        framebufferCreateInfo.pAttachments = attachments;
-        framebufferCreateInfo.width = width;
-        framebufferCreateInfo.height = height;
-        framebufferCreateInfo.layers = 1;
-
-        if (vkCreateFramebuffer(window.device, &framebufferCreateInfo, nullptr,
-                                &pipeline->framebuffer) != VK_SUCCESS) {
-            LOG_ERROR("vkCreateFramebuffer failed\n");
-            return false;
-        }
-    }
-
-    // descriptor set layout
-    {
-        VkDescriptorSetLayoutBinding layoutBindings[3] = {};
-
-        layoutBindings[0].binding = 0;
-        layoutBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        layoutBindings[0].descriptorCount = 1;
-        layoutBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        layoutBindings[0].pImmutableSamplers = nullptr;
-
-        layoutBindings[1].binding = 1;
-        layoutBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        layoutBindings[1].descriptorCount = 1;
-        layoutBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        layoutBindings[1].pImmutableSamplers = nullptr;
-
-        layoutBindings[2].binding = 2;
-        layoutBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        layoutBindings[2].descriptorCount = 1;
-        layoutBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        layoutBindings[2].pImmutableSamplers = nullptr;
-
-        VkDescriptorSetLayoutCreateInfo layoutCreateInfo = {};
-        layoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutCreateInfo.bindingCount = C_ARRAY_LENGTH(layoutBindings);
-        layoutCreateInfo.pBindings = layoutBindings;
-
-        if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
-                                        &pipeline->descriptorSetLayout) != VK_SUCCESS) {
-            LOG_ERROR("vkCreateDescriptorSetLayout failed\n");
-            return false;
-        }
-    }
-
-    // descriptor pool
-    {
-        VkDescriptorPoolSize poolSizes[2] = {};
-
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        poolSizes[0].descriptorCount = 1;
-
-        poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        poolSizes[1].descriptorCount = 2;
-
-        VkDescriptorPoolCreateInfo poolInfo = {};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = C_ARRAY_LENGTH(poolSizes);
-        poolInfo.pPoolSizes = poolSizes;
-        poolInfo.maxSets = 1;
-
-        if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &pipeline->descriptorPool) != VK_SUCCESS) {
-            LOG_ERROR("vkCreateDescriptorPool failed\n");
-            return false;
-        }
-    }
-
-    // descriptor set
-    {
-        VkDescriptorSetAllocateInfo allocInfo = {};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = pipeline->descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &pipeline->descriptorSetLayout;
-
-        if (vkAllocateDescriptorSets(window.device, &allocInfo, &pipeline->descriptorSet) != VK_SUCCESS) {
-            LOG_ERROR("vkAllocateDescriptorSets failed\n");
-            return false;
-        }
-
-        VkWriteDescriptorSet descriptorWrites[3] = {};
-
-        const VkDescriptorBufferInfo uniformBufferInfo = {
-            .buffer = pipeline->computeUniform.buffer,
-            .offset = 0,
-            .range = sizeof(ComputeUbo),
-        };
-        descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[0].dstSet = pipeline->descriptorSet;
-        descriptorWrites[0].dstBinding = 0;
-        descriptorWrites[0].dstArrayElement = 0;
-        descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorWrites[0].descriptorCount = 1;
-        descriptorWrites[0].pBufferInfo = &uniformBufferInfo;
-
-        const VkDescriptorBufferInfo triangleBufferInfo = {
-            .buffer = pipeline->computeTriangles.buffer,
-            .offset = 0,
-            .range = pipeline->numTriangles * sizeof(ComputeTriangle),
-        };
-        descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[1].dstSet = pipeline->descriptorSet;
-        descriptorWrites[1].dstBinding = 1;
-        descriptorWrites[1].dstArrayElement = 0;
-        descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[1].descriptorCount = 1;
-        descriptorWrites[1].pBufferInfo = &triangleBufferInfo;
-
-        const VkDescriptorBufferInfo bvhBufferInfo = {
-            .buffer = pipeline->computeBvhs.buffer,
-            .offset = 0,
-            .range = pipeline->numBvhs * sizeof(ComputeBvh),
-        };
-        descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[2].dstSet = pipeline->descriptorSet;
-        descriptorWrites[2].dstBinding = 2;
-        descriptorWrites[2].dstArrayElement = 0;
-        descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[2].descriptorCount = 1;
-        descriptorWrites[2].pBufferInfo = &bvhBufferInfo;
-
-        vkUpdateDescriptorSets(window.device, C_ARRAY_LENGTH(descriptorWrites), descriptorWrites, 0, nullptr);
-    }
-
-    // Create pipeline
-    {
-        const Array<uint8> vertShaderCode = LoadEntireFile(ToString("data/shaders/raytracer.vert.spv"), allocator);
-        if (vertShaderCode.data == nullptr) {
-            LOG_ERROR("Failed to load vertex shader code\n");
-            return false;
-        }
-        const Array<uint8> fragShaderCode = LoadEntireFile(ToString("data/shaders/raytracer.frag.spv"), allocator);
-        if (fragShaderCode.data == nullptr) {
-            LOG_ERROR("Failed to load fragment shader code\n");
-            return false;
-        }
-
-        VkShaderModule vertShaderModule;
-        if (!CreateShaderModule(vertShaderCode, window.device, &vertShaderModule)) {
-            LOG_ERROR("Failed to create vertex shader module\n");
-            return false;
-        }
-        defer(vkDestroyShaderModule(window.device, vertShaderModule, nullptr));
-
-        VkShaderModule fragShaderModule;
-        if (!CreateShaderModule(fragShaderCode, window.device, &fragShaderModule)) {
-            LOG_ERROR("Failed to create fragment shader module\n");
-            return false;
-        }
-        defer(vkDestroyShaderModule(window.device, fragShaderModule, nullptr));
-
-        VkPipelineShaderStageCreateInfo vertShaderStageCreateInfo = {};
-        vertShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        vertShaderStageCreateInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-        vertShaderStageCreateInfo.module = vertShaderModule;
-        vertShaderStageCreateInfo.pName = "main";
-        // vertShaderStageCreateInfo.pSpecializationInfo is useful for setting shader constants
-
-        VkPipelineShaderStageCreateInfo fragShaderStageCreateInfo = {};
-        fragShaderStageCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        fragShaderStageCreateInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        fragShaderStageCreateInfo.module = fragShaderModule;
-        fragShaderStageCreateInfo.pName = "main";
-
-        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageCreateInfo, fragShaderStageCreateInfo };
-
-        VkVertexInputBindingDescription bindingDescription = {};
-        bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(VulkanScreenQuadVertex);
-        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        VkVertexInputAttributeDescription attributeDescriptions[2] = {};
-
-        attributeDescriptions[0].binding = 0;
-        attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[0].offset = offsetof(VulkanScreenQuadVertex, pos);
-
-        attributeDescriptions[1].binding = 0;
-        attributeDescriptions[1].location = 1;
-        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[1].offset = offsetof(VulkanScreenQuadVertex, uv);
-
-        VkPipelineVertexInputStateCreateInfo vertexInputCreateInfo = {};
-        vertexInputCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputCreateInfo.vertexBindingDescriptionCount = 1;
-        vertexInputCreateInfo.pVertexBindingDescriptions = &bindingDescription;
-        vertexInputCreateInfo.vertexAttributeDescriptionCount = C_ARRAY_LENGTH(attributeDescriptions);
-        vertexInputCreateInfo.pVertexAttributeDescriptions = attributeDescriptions;
-
-        VkPipelineInputAssemblyStateCreateInfo inputAssemblyCreateInfo = {};
-        inputAssemblyCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssemblyCreateInfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        inputAssemblyCreateInfo.primitiveRestartEnable = VK_FALSE;
-
-        VkViewport viewport = {};
-        viewport.x = 0.0f;
-        viewport.y = 0.0f;
-        viewport.width = (float32)width;
-        viewport.height = (float32)height;
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
-
-        VkRect2D scissor = {};
-        scissor.offset = { 0, 0 };
-        scissor.extent = VkExtent2D { .width = width, .height = height };
-
-        VkPipelineViewportStateCreateInfo viewportStateCreateInfo = {};
-        viewportStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewportStateCreateInfo.viewportCount = 1;
-        viewportStateCreateInfo.pViewports = &viewport;
-        viewportStateCreateInfo.scissorCount = 1;
-        viewportStateCreateInfo.pScissors = &scissor;
-
-        VkPipelineRasterizationStateCreateInfo rasterizerCreateInfo = {};
-        rasterizerCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizerCreateInfo.depthClampEnable = VK_FALSE;
-        rasterizerCreateInfo.rasterizerDiscardEnable = VK_FALSE;
-        rasterizerCreateInfo.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterizerCreateInfo.lineWidth = 1.0f;
-        rasterizerCreateInfo.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizerCreateInfo.frontFace = VK_FRONT_FACE_CLOCKWISE;
-        rasterizerCreateInfo.depthBiasEnable = VK_FALSE;
-        rasterizerCreateInfo.depthBiasConstantFactor = 0.0f;
-        rasterizerCreateInfo.depthBiasClamp = 0.0f;
-        rasterizerCreateInfo.depthBiasSlopeFactor = 0.0f;
-
-        VkPipelineMultisampleStateCreateInfo multisampleCreateInfo = {};
-        multisampleCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampleCreateInfo.sampleShadingEnable = VK_FALSE;
-        multisampleCreateInfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        multisampleCreateInfo.minSampleShading = 1.0f;
-        multisampleCreateInfo.pSampleMask = nullptr;
-        multisampleCreateInfo.alphaToCoverageEnable = VK_FALSE;
-        multisampleCreateInfo.alphaToOneEnable = VK_FALSE;
-
-        VkPipelineColorBlendAttachmentState colorBlendAttachments[1] = {};
-        colorBlendAttachments[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        colorBlendAttachments[0].blendEnable = VK_FALSE;
-
-        VkPipelineColorBlendStateCreateInfo colorBlendingCreateInfo = {};
-        colorBlendingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlendingCreateInfo.logicOpEnable = VK_FALSE;
-        colorBlendingCreateInfo.logicOp = VK_LOGIC_OP_COPY;
-        colorBlendingCreateInfo.attachmentCount = C_ARRAY_LENGTH(colorBlendAttachments);
-        colorBlendingCreateInfo.pAttachments = colorBlendAttachments;
-        colorBlendingCreateInfo.blendConstants[0] = 0.0f;
-        colorBlendingCreateInfo.blendConstants[1] = 0.0f;
-        colorBlendingCreateInfo.blendConstants[2] = 0.0f;
-        colorBlendingCreateInfo.blendConstants[3] = 0.0f;
-
-        VkPipelineDepthStencilStateCreateInfo depthStencilCreateInfo = {};
-        depthStencilCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencilCreateInfo.depthTestEnable = VK_TRUE;
-        depthStencilCreateInfo.depthWriteEnable = VK_TRUE;
-        depthStencilCreateInfo.depthCompareOp = VK_COMPARE_OP_LESS;
-        depthStencilCreateInfo.depthBoundsTestEnable = VK_FALSE;
-        depthStencilCreateInfo.minDepthBounds = 0.0f; // disabled
-        depthStencilCreateInfo.maxDepthBounds = 1.0f; // disabled
-        depthStencilCreateInfo.stencilTestEnable = VK_FALSE;
-
-        VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
-        pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutCreateInfo.setLayoutCount = 1;
-        pipelineLayoutCreateInfo.pSetLayouts = &pipeline->descriptorSetLayout;
-        pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
-        pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
-
-        if (vkCreatePipelineLayout(window.device, &pipelineLayoutCreateInfo, nullptr,
-                                   &pipeline->pipelineLayout) != VK_SUCCESS) {
-            LOG_ERROR("vkCreatePipelineLayout failed\n");
-            return false;
-        }
-
-        VkGraphicsPipelineCreateInfo pipelineCreateInfo = {};
-        pipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipelineCreateInfo.stageCount = C_ARRAY_LENGTH(shaderStages);
-        pipelineCreateInfo.pStages = shaderStages;
-        pipelineCreateInfo.pVertexInputState = &vertexInputCreateInfo;
-        pipelineCreateInfo.pInputAssemblyState = &inputAssemblyCreateInfo;
-        pipelineCreateInfo.pViewportState = &viewportStateCreateInfo;
-        pipelineCreateInfo.pRasterizationState = &rasterizerCreateInfo;
-        pipelineCreateInfo.pMultisampleState = &multisampleCreateInfo;
-        pipelineCreateInfo.pDepthStencilState = &depthStencilCreateInfo;
-        pipelineCreateInfo.pColorBlendState = &colorBlendingCreateInfo;
-        pipelineCreateInfo.pDynamicState = nullptr;
-        pipelineCreateInfo.layout = pipeline->pipelineLayout;
-        pipelineCreateInfo.renderPass = pipeline->renderPass;
-        pipelineCreateInfo.subpass = 0;
-        pipelineCreateInfo.basePipelineHandle = VK_NULL_HANDLE;
-        pipelineCreateInfo.basePipelineIndex = -1;
-
-        if (vkCreateGraphicsPipelines(window.device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr,
-                                      &pipeline->pipeline) != VK_SUCCESS) {
-            LOG_ERROR("vkCreateGraphicsPipeline failed\n");
-            return false;
-        }
-    }
-
-    // Record command buffer
-    {
-        VkCommandBufferAllocateInfo allocInfo = {};
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        allocInfo.pNext = nullptr;
-        allocInfo.commandPool = commandPool;
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocInfo.commandBufferCount = 1;
-
-        if (vkAllocateCommandBuffers(window.device, &allocInfo, &pipeline->commandBuffer) != VK_SUCCESS) {
-            LOG_ERROR("vkAllocateCommandBuffers failed\n");
-            return false;
-        }
-
-        VkCommandBufferBeginInfo beginInfo = {};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = 0;
-        beginInfo.pInheritanceInfo = nullptr;
-
-        if (vkBeginCommandBuffer(pipeline->commandBuffer, &beginInfo) != VK_SUCCESS) {
-            LOG_ERROR("vkBeginCommandBuffer failed\n");
-            return false;
-        }
-
-        const VkClearValue clearValues[] = {
-            {
-                .color = {
-                    .float32 = { 0.0f, 0.0f, 0.0f, 0.0f }
-                },
-            },
-        };
-
-        VkRenderPassBeginInfo renderPassInfo = {};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = pipeline->renderPass;
-        renderPassInfo.framebuffer = pipeline->framebuffer;
-        renderPassInfo.renderArea.offset = { 0, 0 };
-        renderPassInfo.renderArea.extent = VkExtent2D { .width = width, .height = height };
-        renderPassInfo.clearValueCount = C_ARRAY_LENGTH(clearValues);
-        renderPassInfo.pClearValues = clearValues;
-
-        vkCmdBeginRenderPass(pipeline->commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindPipeline(pipeline->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
-
-        const VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(pipeline->commandBuffer, 0, 1, &pipeline->vertexBuffer.buffer, offsets);
-
-        vkCmdBindDescriptorSets(pipeline->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipeline->pipelineLayout, 0, 1,
-                                &pipeline->descriptorSet, 0, nullptr);
-
-        vkCmdDraw(pipeline->commandBuffer, 6, 1, 0, 0);
-
-        vkCmdEndRenderPass(pipeline->commandBuffer);
-
-        if (vkEndCommandBuffer(pipeline->commandBuffer) != VK_SUCCESS) {
-            LOG_ERROR("vkEndCommandBuffer failed\n");
-        }
-    }
-
     return true;
 }
 
 void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline)
 {
-    vkDestroyPipeline(device, pipeline->pipeline, nullptr);
-    vkDestroyPipelineLayout(device, pipeline->pipelineLayout, nullptr);
-    vkDestroyDescriptorPool(device, pipeline->descriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, pipeline->descriptorSetLayout, nullptr);
-    vkDestroyFramebuffer(device, pipeline->framebuffer, nullptr);
-    DestroyVulkanImage(device, &pipeline->image);
-    vkDestroyRenderPass(device, pipeline->renderPass, nullptr);
-    DestroyVulkanBuffer(device, &pipeline->vertexBuffer);
-
     vkDestroyFence(device, pipeline->computeFence, nullptr);
     vkDestroyPipeline(device, pipeline->computePipeline, nullptr);
     vkDestroyPipelineLayout(device, pipeline->computePipelineLayout, nullptr);
