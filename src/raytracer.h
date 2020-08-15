@@ -16,6 +16,7 @@ struct ComputeMaterial
 
 struct ComputeMesh
 {
+    Vec4 quat;
 	Vec3 offset;
     uint32 startBvh;
     uint32 endBvh;

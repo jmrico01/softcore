@@ -44,6 +44,7 @@ struct Bvh
 
 struct Mesh
 {
+	vec4 quat;
 	vec3 offset;
 	uint startBvh;
 	uint endBvh;
@@ -285,29 +286,30 @@ bool RayTriangleIntersection(vec3 rayOrigin, vec3 rayDir, vec3 a, vec3 b, vec3 c
 }
 
 // TODO review inout hitMaterialIndex and other in/out params
-void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, vec3 inverseRayDir,
-				  inout uint hitMaterialIndex, out vec3 hitNormal, inout float hitDist)
+void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, inout uint hitMaterialIndex, out vec3 hitNormal, inout float hitDist)
 {
 	for (uint m = 0; m < ubo.numMeshes; m++) {
 		const Mesh mesh = ubo.meshes[m];
 		const vec3 meshRayOrigin = rayOrigin + mesh.offset;
+		const vec3 meshRayDir = QuatRotate(rayDir, mesh.quat);
+		const vec3 meshInverseRayDir = Reciprocal(meshRayDir);
 
 		uint i = mesh.startBvh;
 		while (i < mesh.endBvh) {
 			const Bvh bvh = bvhs[i];
 
 			float tMin, tMax;
-			const bool aabbHit = RayAABBIntersection(meshRayOrigin, inverseRayDir, bvh.aabbMin, bvh.aabbMax,
+			const bool aabbHit = RayAABBIntersection(meshRayOrigin, meshInverseRayDir, bvh.aabbMin, bvh.aabbMax,
 													 tMin, tMax);
 			if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
 				const uint tStart = bvh.startTriangle;
 				const uint tEnd = bvh.endTriangle;
 				for (uint i = tStart; i < tEnd; i++) {
 					const vec3 normal = triangles[i].normal;
-					const float dotNegRayNormal = dot(rayDir, normal);
+					const float dotNegRayNormal = dot(meshRayDir, normal);
 					if (dotNegRayNormal <= 0.0) {
 						float t;
-						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, rayDir,
+						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, meshRayDir,
 																		 triangles[i].a, triangles[i].b, triangles[i].c,
 																		 t);
 						if (triangleHit && t > MIN_DIST && t < hitDist) {
@@ -336,9 +338,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 	uint hitMaterialIndex = MAX_MATERIALS;
 	vec3 hitNormal;
 	float hitDist = MAX_DIST;
-
-	const vec3 inverseRayDir = Reciprocal(rayDir);
-	TraverseMeshes(rayOrigin, rayDir, inverseRayDir, hitMaterialIndex, hitNormal, hitDist);
+	TraverseMeshes(rayOrigin, rayDir, hitMaterialIndex, hitNormal, hitDist);
 
 	Material hitMaterial;
 	if (hitMaterialIndex == MAX_MATERIALS) {
@@ -367,11 +367,9 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 		vec3 sampleRayDir = sampleRayDirDiffuse;
 
 		for (uint i = 0; i < BOUNCES_DIFFUSE; i++) {
-			const vec3 inverseSampleRayDir = Reciprocal(sampleRayDir);
 			hitMaterialIndex = MAX_MATERIALS;
 			hitDist = MAX_DIST;
-
-			TraverseMeshes(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, hitMaterialIndex, hitNormal, hitDist);
 
 			if (hitMaterialIndex == MAX_MATERIALS) {
 				break;
@@ -397,11 +395,9 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 		vec3 sampleRayDir = sampleRayDirSpecular;
 
 		for (uint i = 0; i < BOUNCES_SPECULAR; i++) {
-			const vec3 inverseSampleRayDir = Reciprocal(sampleRayDir);
 			hitMaterialIndex = MAX_MATERIALS;
 			hitDist = MAX_DIST;
-
-			TraverseMeshes(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, hitMaterialIndex, hitNormal, hitDist);
 
 			if (hitMaterialIndex == MAX_MATERIALS) {
 				break;

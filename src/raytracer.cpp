@@ -692,6 +692,9 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
             ComputeMesh* newMesh = pipeline->meshes.Append();
             newMesh->offset = Vec3::zero;
+            newMesh->quat = Vec4 {
+                Quat::one.x, Quat::one.y, Quat::one.z, Quat::one.w
+            };
             newMesh->startBvh = bvhs.size;
 
             bvhStack.Clear();

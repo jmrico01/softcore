@@ -567,10 +567,14 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         const Vec3 tetrahedronPos = Vec3 {
             Sin32(appState->elapsedTime),
-            0.0f,
+            0.1f * Sin32(appState->elapsedTime / 23.0f),
             0.0f
         };
+        const Quat tetrahedronRot = QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ);
         computeUbo->meshes[6].offset = -tetrahedronPos;
+        computeUbo->meshes[6].quat = Vec4 {
+            tetrahedronRot.x, tetrahedronRot.y, tetrahedronRot.z, tetrahedronRot.w
+        };
 
         void* data;
         vkMapMemory(vulkanState.window.device, raytracePipeline.uniform.memory, 0, sizeof(ComputeUbo), 0, &data);
