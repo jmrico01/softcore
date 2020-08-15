@@ -1,14 +1,15 @@
 #version 450
 
-#define PI_F 3.14159265
-
 #define TILE_SIZE 16
 #define MAX_MATERIALS 16
+#define MAX_MESHES 128
 
 #define SAMPLES_DIFFUSE 1
 #define SAMPLES_SPECULAR 1
 #define BOUNCES_DIFFUSE 1
 #define BOUNCES_SPECULAR 1
+
+#define PI_F 3.14159265
 
 #define FLOAT_BIG_POSITIVE 1e6
 #define EPSILON 0.000001
@@ -41,6 +42,13 @@ struct Bvh
 	uint skip;
 };
 
+struct Mesh
+{
+	vec3 offset;
+	uint startBvh;
+	uint endBvh;
+};
+
 layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE) in;
 
 layout(binding = 0, rgba8) uniform writeonly image2D resultImage;
@@ -49,9 +57,11 @@ layout(binding = 1) uniform UBO
 	vec3 cameraPos;
 	uint seed;
 	vec3 filmTopLeft;
+	uint numMeshes;
 	vec3 filmUnitOffsetX;
 	vec3 filmUnitOffsetY;
 	Material materials[MAX_MATERIALS];
+	Mesh meshes[MAX_MESHES];
 } ubo;
 layout(std140, binding = 2) readonly buffer Triangles
 {
@@ -129,6 +139,16 @@ vec3 RandomInHemisphereUnitX(inout uint state)
 	));
 }
 
+float pow3(float x)
+{
+	return x * x * x;
+}
+
+float pow4(float x)
+{
+	return x * x * x * x;
+}
+
 vec3 Reciprocal(vec3 v)
 {
 	return vec3(1.0 / v.x, 1.0 / v.y, 1.0 / v.z);
@@ -197,10 +217,12 @@ vec3 GetNewRayDirDiffuse(vec3 hitPos, vec3 hitNormal, inout uint randomState)
 
 vec3 GetNewRayDirSpecular(vec3 rayDir, vec3 hitNormal, float smoothness, inout uint randomState)
 {
-	// TODO hmm... not conviced with this. I want smoothness=0 perfect diffuse, smoothness=1 perfect mirror
-	const float z = RandomUnilateral(randomState);
-	const float e = 1.0 / (smoothness * 1000.0 + 1.0);
-	const float gamma = acos(pow(z, e));
+	// Gamma is a random variable between 0 and pi/2, that is picked from a distribution which is
+	// lerp between uniform and gaussian w/ fancy params, based on parameter smoothness
+	const float oneMinusS = 1.0 - smoothness;
+	const float c = 1.0 / (pow3(oneMinusS)) - 1.0;
+	const float x = RandomUnilateral(randomState);
+	const float gamma = mix(1.0 - x, exp(-c * x * x), smoothness) * PI_F / 2.0f;
 	const float phi = RandomUnilateral(randomState) * 2.0 * PI_F;
 	const vec3 pureBounce = reflect(rayDir, hitNormal);
 
@@ -263,37 +285,44 @@ bool RayTriangleIntersection(vec3 rayOrigin, vec3 rayDir, vec3 a, vec3 b, vec3 c
 }
 
 // TODO review inout hitMaterialIndex and other in/out params
-void TraverseBvhs(vec3 rayOrigin, vec3 rayDir, vec3 inverseRayDir,
+void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, vec3 inverseRayDir,
 				  inout uint hitMaterialIndex, out vec3 hitNormal, inout float hitDist)
 {
-	uint i = 0;
-	while (i < bvhs.length()) {
-		const Bvh bvh = bvhs[i];
+	for (uint m = 0; m < ubo.numMeshes; m++) {
+		const Mesh mesh = ubo.meshes[m];
+		const vec3 meshRayOrigin = rayOrigin + mesh.offset;
 
-		float tMin, tMax;
-		const bool aabbHit = RayAABBIntersection(rayOrigin, inverseRayDir, bvh.aabbMin, bvh.aabbMax, tMin, tMax);
-		if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
-			const uint tStart = bvh.startTriangle;
-			const uint tEnd = bvh.endTriangle;
-			for (uint i = tStart; i < tEnd; i++) {
-				const vec3 normal = triangles[i].normal;
-				const float dotNegRayNormal = dot(rayDir, normal);
-				if (dotNegRayNormal <= 0.0) {
-					float t;
-					const bool triangleHit = RayTriangleIntersection(rayOrigin, rayDir,
-																	 triangles[i].a, triangles[i].b, triangles[i].c, t);
-					if (triangleHit && t > MIN_DIST && t < hitDist) {
-						hitMaterialIndex = triangles[i].materialIndex;
-						hitNormal = normal;
-						hitDist = t;
+		uint i = mesh.startBvh;
+		while (i < mesh.endBvh) {
+			const Bvh bvh = bvhs[i];
+
+			float tMin, tMax;
+			const bool aabbHit = RayAABBIntersection(meshRayOrigin, inverseRayDir, bvh.aabbMin, bvh.aabbMax,
+													 tMin, tMax);
+			if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
+				const uint tStart = bvh.startTriangle;
+				const uint tEnd = bvh.endTriangle;
+				for (uint i = tStart; i < tEnd; i++) {
+					const vec3 normal = triangles[i].normal;
+					const float dotNegRayNormal = dot(rayDir, normal);
+					if (dotNegRayNormal <= 0.0) {
+						float t;
+						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, rayDir,
+																		 triangles[i].a, triangles[i].b, triangles[i].c,
+																		 t);
+						if (triangleHit && t > MIN_DIST && t < hitDist) {
+							hitMaterialIndex = triangles[i].materialIndex;
+							hitNormal = normal;
+							hitDist = t;
+						}
 					}
 				}
-			}
 
-			i++;
-		}
-		else {
-			i += bvh.skip;
+				i++;
+			}
+			else {
+				i += bvh.skip;
+			}
 		}
 	}
 }
@@ -309,7 +338,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 	float hitDist = MAX_DIST;
 
 	const vec3 inverseRayDir = Reciprocal(rayDir);
-	TraverseBvhs(rayOrigin, rayDir, inverseRayDir, hitMaterialIndex, hitNormal, hitDist);
+	TraverseMeshes(rayOrigin, rayDir, inverseRayDir, hitMaterialIndex, hitNormal, hitDist);
 
 	Material hitMaterial;
 	if (hitMaterialIndex == MAX_MATERIALS) {
@@ -342,7 +371,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 			hitMaterialIndex = MAX_MATERIALS;
 			hitDist = MAX_DIST;
 
-			TraverseBvhs(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
 
 			if (hitMaterialIndex == MAX_MATERIALS) {
 				break;
@@ -372,7 +401,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 			hitMaterialIndex = MAX_MATERIALS;
 			hitDist = MAX_DIST;
 
-			TraverseBvhs(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, inverseSampleRayDir, hitMaterialIndex, hitNormal, hitDist);
 
 			if (hitMaterialIndex == MAX_MATERIALS) {
 				break;

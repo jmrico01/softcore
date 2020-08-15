@@ -44,11 +44,32 @@ float32 RandomBilateral(RandomSeries* series)
     return 2.0f * RandomUnilateral(series) - 1.0f;
 }
 
+struct ComputeBvh
+{
+	Vec3 aabbMin;
+	uint32 startTriangle;
+	Vec3 aabbMax;
+	uint32 endTriangle;
+    uint32 skip;
+    uint32 pad[3];
+};
+static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
+
+struct ComputeTriangle
+{
+    alignas(16) Vec3 a;
+    alignas(16) Vec3 b;
+    alignas(16) Vec3 c;
+    alignas(16) Vec3 normal;
+    uint32 materialIndex;
+};
+static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
+
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
     if (StringEquals(name, ToString("Surfaces"))) {
         material->smoothness = 0.8f;
-        material->albedo = Vec3 { 151.0f, 162.0f, 176.0f } / 255.0f;
+        material->albedo = Vec3 { 151, 162, 176 } / 255.0f;
         material->emission = 0.0f;
         material->emissionColor = Vec3::zero;
     }
@@ -68,13 +89,13 @@ bool GetMaterial(const_string name, RaycastMaterial* material)
         material->smoothness = 0.0f;
         material->albedo = Vec3::zero;
         material->emission = 1.0f;
-        material->emissionColor = Vec3 { 237.0f, 166.0f, 255.0f } / 255.0f;
+        material->emissionColor = Vec3 { 237, 166, 255 } / 255.0f;
     }
     else if (StringEquals(name, ToString("LightRed"))) {
         material->smoothness = 0.0f;
         material->albedo = Vec3::zero;
         material->emission = 4.0f;
-        material->emissionColor = Vec3 { 255.0f, 0.0f, 21.0f } / 255.0f;
+        material->emissionColor = Vec3 { 255, 0, 21 } / 255.0f;
     }
     else {
         return false;
@@ -643,7 +664,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         queueCreateInfo.pNext = nullptr;
         queueCreateInfo.queueFamilyIndex = queueFamilyInfo.computeFamilyIndex;
         queueCreateInfo.queueCount = 1;
-        vkGetDeviceQueue(window.device, queueFamilyInfo.computeFamilyIndex, 0, &pipeline->computeQueue);
+        vkGetDeviceQueue(window.device, queueFamilyInfo.computeFamilyIndex, 0, &pipeline->queue);
 
         VkCommandPoolCreateInfo commandPoolCreateInfo = {};
         commandPoolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -651,22 +672,27 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         commandPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 
         if (vkCreateCommandPool(window.device, &commandPoolCreateInfo, nullptr,
-                                &pipeline->computeCommandPool) != VK_SUCCESS) {
+                                &pipeline->commandPool) != VK_SUCCESS) {
             LOG_ERROR("vkCreateCommandPool failed\n");
             return false;
         }
     }
 
-    // triangles and BVHs
+    // triangles, BVHs, meshes
     {
         SCOPED_ALLOCATOR_RESET(*allocator);
 
         DynamicArray<ComputeTriangle, LinearAllocator> triangles(allocator);
         DynamicArray<ComputeBvh, LinearAllocator> bvhs(allocator);
+        pipeline->meshes.Clear();
         DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(allocator);
 
         for (uint32 i = 0; i < geometry.meshes.size; i++) {
             const RaycastMesh& mesh = geometry.meshes[i];
+
+            ComputeMesh* newMesh = pipeline->meshes.Append();
+            newMesh->offset = Vec3::zero;
+            newMesh->startBvh = bvhs.size;
 
             bvhStack.Clear();
             bvhStack.Append(&mesh.bvh);
@@ -703,6 +729,8 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
                     bvhStack.Append(bvh->child1);
                 }
             }
+
+            newMesh->endBvh = bvhs.size;
         }
 
         const VkDeviceSize triangleBufferSize = triangles.size * sizeof(ComputeTriangle);
@@ -726,7 +754,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         if (!CreateVulkanBuffer(triangleBufferSize,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                window.device, window.physicalDevice, &pipeline->computeTriangles)) {
+                                window.device, window.physicalDevice, &pipeline->triangles)) {
             LOG_ERROR("CreateVulkanBuffer failed\n");
             return false;
         }
@@ -739,14 +767,14 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         // Copy triangle data to final storage buffer
         {
             SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
-            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->computeTriangles.buffer, triangleBufferSize);
+            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->triangles.buffer, triangleBufferSize);
         }
 
         // Create bvh storage buffer
         if (!CreateVulkanBuffer(bvhBufferSize,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                window.device, window.physicalDevice, &pipeline->computeBvhs)) {
+                                window.device, window.physicalDevice, &pipeline->bvhs)) {
             LOG_ERROR("CreateVulkanBuffer failed\n");
             return false;
         }
@@ -759,7 +787,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         // Copy bvh data to final storage buffer
         {
             SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
-            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->computeBvhs.buffer, bvhBufferSize);
+            CopyBuffer(commandBuffer, stagingBuffer.buffer, pipeline->bvhs.buffer, bvhBufferSize);
         }
     }
 
@@ -769,7 +797,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         if (!CreateVulkanBuffer(uniformBufferSize,
                                 VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                window.device, window.physicalDevice, &pipeline->computeUniform)) {
+                                window.device, window.physicalDevice, &pipeline->uniform)) {
             LOG_ERROR("CreateBuffer failed for vertex buffer\n");
             return false;
         }
@@ -789,19 +817,19 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
                          VK_IMAGE_TILING_OPTIMAL,
                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         &pipeline->computeImage.image, &pipeline->computeImage.memory)) {
+                         &pipeline->image.image, &pipeline->image.memory)) {
             LOG_ERROR("CreateImage failed\n");
             return false;
         }
 
-        if (!CreateImageView(window.device, pipeline->computeImage.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
-                             &pipeline->computeImage.view)) {
+        if (!CreateImageView(window.device, pipeline->image.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
+                             &pipeline->image.view)) {
             LOG_ERROR("CreateImageView failed\n");
             return false;
         }
 
         SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
-        TransitionImageLayout(commandBuffer, pipeline->computeImage.image,
+        TransitionImageLayout(commandBuffer, pipeline->image.image,
                               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     }
 
@@ -839,7 +867,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         layoutCreateInfo.pBindings = layoutBindings;
 
         if (vkCreateDescriptorSetLayout(window.device, &layoutCreateInfo, nullptr,
-                                        &pipeline->computeDescriptorSetLayout) != VK_SUCCESS) {
+                                        &pipeline->descriptorSetLayout) != VK_SUCCESS) {
             LOG_ERROR("vkCreateDescriptorSetLayout failed\n");
             return false;
         }
@@ -864,7 +892,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         poolInfo.pPoolSizes = poolSizes;
         poolInfo.maxSets = 1;
 
-        if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &pipeline->computeDescriptorPool) != VK_SUCCESS) {
+        if (vkCreateDescriptorPool(window.device, &poolInfo, nullptr, &pipeline->descriptorPool) != VK_SUCCESS) {
             LOG_ERROR("vkCreateDescriptorPool failed\n");
             return false;
         }
@@ -874,11 +902,11 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
     {
         VkDescriptorSetAllocateInfo allocInfo = {};
         allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = pipeline->computeDescriptorPool;
+        allocInfo.descriptorPool = pipeline->descriptorPool;
         allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &pipeline->computeDescriptorSetLayout;
+        allocInfo.pSetLayouts = &pipeline->descriptorSetLayout;
 
-        if (vkAllocateDescriptorSets(window.device, &allocInfo, &pipeline->computeDescriptorSet) != VK_SUCCESS) {
+        if (vkAllocateDescriptorSets(window.device, &allocInfo, &pipeline->descriptorSet) != VK_SUCCESS) {
             LOG_ERROR("vkAllocateDescriptorSets failed\n");
             return false;
         }
@@ -887,11 +915,11 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
         const VkDescriptorImageInfo imageInfo = {
             .sampler = VK_NULL_HANDLE,
-            .imageView = pipeline->computeImage.view,
+            .imageView = pipeline->image.view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL
         };
         descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[0].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[0].dstSet = pipeline->descriptorSet;
         descriptorWrites[0].dstBinding = 0;
         descriptorWrites[0].dstArrayElement = 0;
         descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -899,12 +927,12 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         descriptorWrites[0].pImageInfo = &imageInfo;
 
         const VkDescriptorBufferInfo uniformBufferInfo = {
-            .buffer = pipeline->computeUniform.buffer,
+            .buffer = pipeline->uniform.buffer,
             .offset = 0,
             .range = sizeof(ComputeUbo),
         };
         descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[1].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[1].dstSet = pipeline->descriptorSet;
         descriptorWrites[1].dstBinding = 1;
         descriptorWrites[1].dstArrayElement = 0;
         descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -912,12 +940,12 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         descriptorWrites[1].pBufferInfo = &uniformBufferInfo;
 
         const VkDescriptorBufferInfo triangleBufferInfo = {
-            .buffer = pipeline->computeTriangles.buffer,
+            .buffer = pipeline->triangles.buffer,
             .offset = 0,
             .range = pipeline->numTriangles * sizeof(ComputeTriangle),
         };
         descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[2].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[2].dstSet = pipeline->descriptorSet;
         descriptorWrites[2].dstBinding = 2;
         descriptorWrites[2].dstArrayElement = 0;
         descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -925,12 +953,12 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         descriptorWrites[2].pBufferInfo = &triangleBufferInfo;
 
         const VkDescriptorBufferInfo bvhBufferInfo = {
-            .buffer = pipeline->computeBvhs.buffer,
+            .buffer = pipeline->bvhs.buffer,
             .offset = 0,
             .range = pipeline->numBvhs * sizeof(ComputeBvh),
         };
         descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[3].dstSet = pipeline->computeDescriptorSet;
+        descriptorWrites[3].dstSet = pipeline->descriptorSet;
         descriptorWrites[3].dstBinding = 3;
         descriptorWrites[3].dstArrayElement = 0;
         descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -942,7 +970,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
     // pipeline
     {
-        const Array<uint8> shaderCode = LoadEntireFile(ToString("data/shaders/raytrace.comp.spv"), allocator);
+        const Array<uint8> shaderCode = LoadEntireFile(ToString("data/shaders/raytracer.comp.spv"), allocator);
         if (shaderCode.data == nullptr) {
             LOG_ERROR("Failed to load compute shader code\n");
             return false;
@@ -964,12 +992,12 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
         pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutCreateInfo.setLayoutCount = 1;
-        pipelineLayoutCreateInfo.pSetLayouts = &pipeline->computeDescriptorSetLayout;
+        pipelineLayoutCreateInfo.pSetLayouts = &pipeline->descriptorSetLayout;
         pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
         pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
 
         if (vkCreatePipelineLayout(window.device, &pipelineLayoutCreateInfo, nullptr,
-                                   &pipeline->computePipelineLayout) != VK_SUCCESS) {
+                                   &pipeline->pipelineLayout) != VK_SUCCESS) {
             LOG_ERROR("vkCreatePipelineLayout failed\n");
             return false;
         }
@@ -979,10 +1007,10 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         pipelineCreateInfo.pNext = nullptr;
         pipelineCreateInfo.flags = 0;
         pipelineCreateInfo.stage = shaderStageCreateInfo;
-        pipelineCreateInfo.layout = pipeline->computePipelineLayout;
+        pipelineCreateInfo.layout = pipeline->pipelineLayout;
 
         if (vkCreateComputePipelines(window.device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr,
-                                     &pipeline->computePipeline) != VK_SUCCESS) {
+                                     &pipeline->pipeline) != VK_SUCCESS) {
             LOG_ERROR("vkCreateComputePipelines failed\n");
             return false;
         }
@@ -993,11 +1021,11 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         VkCommandBufferAllocateInfo allocInfo = {};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.pNext = nullptr;
-        allocInfo.commandPool = pipeline->computeCommandPool;
+        allocInfo.commandPool = pipeline->commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         allocInfo.commandBufferCount = 1;
 
-        if (vkAllocateCommandBuffers(window.device, &allocInfo, &pipeline->computeCommandBuffer) != VK_SUCCESS) {
+        if (vkAllocateCommandBuffers(window.device, &allocInfo, &pipeline->commandBuffer) != VK_SUCCESS) {
             LOG_ERROR("vkAllocateCommandBuffers failed\n");
             return false;
         }
@@ -1007,19 +1035,19 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         beginInfo.flags = 0;
         beginInfo.pInheritanceInfo = nullptr;
 
-        if (vkBeginCommandBuffer(pipeline->computeCommandBuffer, &beginInfo) != VK_SUCCESS) {
+        if (vkBeginCommandBuffer(pipeline->commandBuffer, &beginInfo) != VK_SUCCESS) {
             LOG_ERROR("vkBeginCommandBuffer failed\n");
             return false;
         }
 
-        vkCmdBindPipeline(pipeline->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->computePipeline);
-        vkCmdBindDescriptorSets(pipeline->computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pipeline->computePipelineLayout, 0, 1, &pipeline->computeDescriptorSet, 0, 0);
+        vkCmdBindPipeline(pipeline->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+        vkCmdBindDescriptorSets(pipeline->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline->pipelineLayout, 0, 1, &pipeline->descriptorSet, 0, 0);
 
         const uint32 batchSize = VulkanRaytracePipeline::BATCH_SIZE;
-        vkCmdDispatch(pipeline->computeCommandBuffer, width / batchSize, height / batchSize, 1);
+        vkCmdDispatch(pipeline->commandBuffer, width / batchSize, height / batchSize, 1);
 
-        if (vkEndCommandBuffer(pipeline->computeCommandBuffer) != VK_SUCCESS) {
+        if (vkEndCommandBuffer(pipeline->commandBuffer) != VK_SUCCESS) {
             LOG_ERROR("vkEndCommandBuffer failed\n");
             return false;
         }
@@ -1031,7 +1059,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceCreateInfo.flags = 0;//VK_FENCE_CREATE_SIGNALED_BIT;
 
-        if (vkCreateFence(window.device, &fenceCreateInfo, nullptr, &pipeline->computeFence) != VK_SUCCESS) {
+        if (vkCreateFence(window.device, &fenceCreateInfo, nullptr, &pipeline->fence) != VK_SUCCESS) {
             LOG_ERROR("vkCreateFence failed\n");
             return false;
         }
@@ -1042,14 +1070,18 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
 void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline)
 {
-    vkDestroyFence(device, pipeline->computeFence, nullptr);
-    vkDestroyPipeline(device, pipeline->computePipeline, nullptr);
-    vkDestroyPipelineLayout(device, pipeline->computePipelineLayout, nullptr);
-    vkDestroyDescriptorPool(device, pipeline->computeDescriptorPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, pipeline->computeDescriptorSetLayout, nullptr);
-    DestroyVulkanImage(device, &pipeline->computeImage);
-    DestroyVulkanBuffer(device, &pipeline->computeUniform);
-    DestroyVulkanBuffer(device, &pipeline->computeBvhs);
-    DestroyVulkanBuffer(device, &pipeline->computeTriangles);
-    vkDestroyCommandPool(device, pipeline->computeCommandPool, nullptr);
+    vkDestroyFence(device, pipeline->fence, nullptr);
+    vkDestroyPipeline(device, pipeline->pipeline, nullptr);
+
+    vkDestroyPipelineLayout(device, pipeline->pipelineLayout, nullptr);
+    vkDestroyDescriptorPool(device, pipeline->descriptorPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, pipeline->descriptorSetLayout, nullptr);
+
+    DestroyVulkanImage(device, &pipeline->image);
+    DestroyVulkanBuffer(device, &pipeline->uniform);
+
+    DestroyVulkanBuffer(device, &pipeline->bvhs);
+    DestroyVulkanBuffer(device, &pipeline->triangles);
+
+    vkDestroyCommandPool(device, pipeline->commandPool, nullptr);
 }

@@ -14,37 +14,28 @@ struct ComputeMaterial
     float32 emission;
 };
 
-struct ComputeBvh
+struct ComputeMesh
 {
-	Vec3 aabbMin;
-	uint32 startTriangle;
-	Vec3 aabbMax;
-	uint32 endTriangle;
-    uint32 skip;
+	Vec3 offset;
+    uint32 startBvh;
+    uint32 endBvh;
     uint32 pad[3];
 };
-static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
-
-struct ComputeTriangle
-{
-    alignas(16) Vec3 a;
-    alignas(16) Vec3 b;
-    alignas(16) Vec3 c;
-    alignas(16) Vec3 normal;
-    uint32 materialIndex;
-};
-static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
+static_assert(sizeof(ComputeMesh) % 16 == 0); // std140 layout
 
 struct ComputeUbo
 {
     const static uint32 MAX_MATERIALS = 16;
+    const static uint32 MAX_MESHES = 128;
 
 	alignas(16) Vec3 cameraPos;
     uint32 seed;
 	alignas(16) Vec3 filmTopLeft;
+    uint32 numMeshes;
 	alignas(16) Vec3 filmUnitOffsetX;
 	alignas(16) Vec3 filmUnitOffsetY;
 	alignas(16) ComputeMaterial materials[MAX_MATERIALS];
+    alignas(16) ComputeMesh meshes[MAX_MESHES];
 };
 
 struct RaycastMaterial
@@ -112,27 +103,27 @@ struct VulkanRaytracePipeline
 {
     const static uint32 BATCH_SIZE = 16;
 
-    // compute version
-    VkQueue computeQueue;
-    VkCommandPool computeCommandPool;
+    VkQueue queue;
+    VkCommandPool commandPool;
 
-    VulkanImage computeImage;
+    VulkanImage image;
 
     uint32 numTriangles;
-    VulkanBuffer computeTriangles;
+    VulkanBuffer triangles;
     uint32 numBvhs;
-    VulkanBuffer computeBvhs;
-    VulkanBuffer computeUniform;
+    VulkanBuffer bvhs;
+    FixedArray<ComputeMesh, ComputeUbo::MAX_MESHES> meshes;
+    VulkanBuffer uniform;
 
-    VkDescriptorSetLayout computeDescriptorSetLayout;
-    VkDescriptorPool computeDescriptorPool;
-    VkDescriptorSet computeDescriptorSet;
+    VkDescriptorSetLayout descriptorSetLayout;
+    VkDescriptorPool descriptorPool;
+    VkDescriptorSet descriptorSet;
 
-    VkPipelineLayout computePipelineLayout;
-    VkPipeline computePipeline;
+    VkPipelineLayout pipelineLayout;
+    VkPipeline pipeline;
 
-    VkCommandBuffer computeCommandBuffer;
-    VkFence computeFence;
+    VkCommandBuffer commandBuffer;
+    VkFence fence;
 };
 
 bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,

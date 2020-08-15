@@ -19,7 +19,7 @@
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
-const int WINDOW_START_HEIGHT = 1024;
+const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
 const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
@@ -39,8 +39,8 @@ const StartSceneInfo START_SCENE_INFOS[] = {
     },
     {
         .scene = ToString("interior-2"),
-        .pos = Vec3 { -0.73f, -4.79f, 0.45f },
-        .angles = Vec2 { 4.88f, 0.20f },
+        .pos = Vec3 { -0.07f, -2.50f, 1.07f },
+        .angles = Vec2 { -1.57f, -0.22f },
     },
     {
         .scene = ToString("light-cones"),
@@ -145,7 +145,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     }
 
     // const VkImageView rasterizedImageView = meshPipeline->colorImage.view;
-    const VkImageView rasterizedImageView = raytracePipeline->computeImage.view;
+    const VkImageView rasterizedImageView = raytracePipeline->image.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
@@ -183,7 +183,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         appState->cameraPos = START_SCENE_INFO.pos;
         appState->cameraAngles = START_SCENE_INFO.angles;
-        appState->fovDegrees = 50.0f;
+        appState->fovDegrees = 60.0f;
 
         appState->canvas.screenFill = 0.5f;
         appState->canvas.decayFrames = 2;
@@ -561,10 +561,21 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
 
+        const uint32 numMeshes = raytracePipeline.meshes.size;
+        computeUbo->numMeshes = numMeshes;
+        MemCopy(computeUbo->meshes, raytracePipeline.meshes.data, numMeshes * sizeof(ComputeMesh));
+
+        const Vec3 tetrahedronPos = Vec3 {
+            Sin32(appState->elapsedTime),
+            0.0f,
+            0.0f
+        };
+        computeUbo->meshes[6].offset = -tetrahedronPos;
+
         void* data;
-        vkMapMemory(vulkanState.window.device, raytracePipeline.computeUniform.memory, 0, sizeof(ComputeUbo), 0, &data);
+        vkMapMemory(vulkanState.window.device, raytracePipeline.uniform.memory, 0, sizeof(ComputeUbo), 0, &data);
         MemCopy(data, computeUbo, sizeof(ComputeUbo));
-        vkUnmapMemory(vulkanState.window.device, raytracePipeline.computeUniform.memory);
+        vkUnmapMemory(vulkanState.window.device, raytracePipeline.uniform.memory);
 
         VkSubmitInfo submitInfo = {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -572,19 +583,18 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         submitInfo.pWaitSemaphores = nullptr;
         submitInfo.pWaitDstStageMask = nullptr;
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &raytracePipeline.computeCommandBuffer;
+        submitInfo.pCommandBuffers = &raytracePipeline.commandBuffer;
         submitInfo.signalSemaphoreCount = 0;
         submitInfo.pSignalSemaphores = nullptr;
 
-        if (vkQueueSubmit(raytracePipeline.computeQueue, 1, &submitInfo, raytracePipeline.computeFence) != VK_SUCCESS) {
+        if (vkQueueSubmit(raytracePipeline.queue, 1, &submitInfo, raytracePipeline.fence) != VK_SUCCESS) {
             LOG_ERROR("vkQueueSubmit failed\n");
         }
 
-        if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.computeFence, VK_TRUE,
-                            UINT64_MAX) != VK_SUCCESS) {
+        if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
             LOG_ERROR("vkWaitForFences failed\n");
         }
-        if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.computeFence) != VK_SUCCESS) {
+        if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.fence) != VK_SUCCESS) {
             LOG_ERROR("vkResetFences failed\n");
         }
     }
@@ -638,7 +648,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     imageCopy.extent.height = screenSize.y;
     imageCopy.extent.depth = 1;
 
-    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.computeImage.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.image.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
@@ -699,7 +709,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     vkCmdEndRenderPass(buffer);
 
     // TODO uhhhh
-    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.computeImage.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.image.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
     if (vkEndCommandBuffer(buffer) != VK_SUCCESS) {
@@ -759,7 +769,7 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
     }
 
     // const VkImageView rasterizedImageView = app->meshPipeline.colorImage.view;
-    const VkImageView rasterizedImageView = app->raytracePipeline.computeImage.view;
+    const VkImageView rasterizedImageView = app->raytracePipeline.image.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, &allocator, &app->compositePipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan composite pipeline\n");
         return false;
