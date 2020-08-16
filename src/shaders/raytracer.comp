@@ -44,7 +44,7 @@ struct Bvh
 
 struct Mesh
 {
-	vec4 quat;
+	vec4 inverseQuat;
 	vec3 offset;
 	uint startBvh;
 	uint endBvh;
@@ -290,8 +290,8 @@ void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, inout uint hitMaterialIndex, ou
 {
 	for (uint m = 0; m < ubo.numMeshes; m++) {
 		const Mesh mesh = ubo.meshes[m];
-		const vec3 meshRayOrigin = rayOrigin + mesh.offset;
-		const vec3 meshRayDir = QuatRotate(rayDir, mesh.quat);
+		const vec3 meshRayOrigin = QuatRotate(rayOrigin + mesh.offset, mesh.inverseQuat);
+		const vec3 meshRayDir = QuatRotate(rayDir, mesh.inverseQuat);
 		const vec3 meshInverseRayDir = Reciprocal(meshRayDir);
 
 		uint i = mesh.startBvh;

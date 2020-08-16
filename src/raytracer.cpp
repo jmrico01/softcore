@@ -7,10 +7,45 @@
 #include <Tracy.hpp>
 #include <TracyC.h>
 
+#define BOUNCES_DIFFUSE 1
+#define BOUNCES_SPECULAR 2
+
+struct ComputeBvh
+{
+	Vec3 aabbMin;
+	uint32 startTriangle;
+	Vec3 aabbMax;
+	uint32 endTriangle;
+    uint32 skip;
+    uint32 pad[3];
+};
+static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
+
+struct ComputeTriangle
+{
+    alignas(16) Vec3 a;
+    alignas(16) Vec3 b;
+    alignas(16) Vec3 c;
+    alignas(16) Vec3 normal;
+    uint32 materialIndex;
+};
+static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
+
 struct RandomSeries
 {
     uint32 state;
 };
+
+// Reference http://www.burtleburtle.net/bob/hash/integer.html
+uint32 WangHash(uint32 seed)
+{
+    seed = (seed ^ 61) ^ (seed >> 16);
+    seed *= 9;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2d;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
 
 // Reference https://en.wikipedia.org/wiki/Xorshift
 uint32 XOrShift32(RandomSeries* series)
@@ -43,27 +78,6 @@ float32 RandomBilateral(RandomSeries* series)
 {
     return 2.0f * RandomUnilateral(series) - 1.0f;
 }
-
-struct ComputeBvh
-{
-	Vec3 aabbMin;
-	uint32 startTriangle;
-	Vec3 aabbMax;
-	uint32 endTriangle;
-    uint32 skip;
-    uint32 pad[3];
-};
-static_assert(sizeof(ComputeBvh) % 16 == 0); // std140 layout
-
-struct ComputeTriangle
-{
-    alignas(16) Vec3 a;
-    alignas(16) Vec3 b;
-    alignas(16) Vec3 c;
-    alignas(16) Vec3 normal;
-    uint32 materialIndex;
-};
-static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
 
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
@@ -104,27 +118,30 @@ bool GetMaterial(const_string name, RaycastMaterial* material)
     return true;
 }
 
-bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 bvhMaxTriangles, bool firstPass,
-                        uint32 depth, uint32* maxDepth, Array<RaycastTriangle> triangles,
-                        LinearAllocator* allocator, LinearAllocator* tempAllocator)
+Box CalculateAABBForTriangles(Array<RaycastTriangle> triangles)
 {
-    DEBUG_ASSERT(bvh != nullptr);
+    Box aabb = { .min = Vec3::one * 1e8, .max = -Vec3::one * 1e8 };
 
-    if (firstPass) {
-        *maxDepth = 0;
+    for (uint32 i = 0; i < triangles.size; i++) {
+        for (int k = 0; k < 3; k++) {
+            const Vec3 v = triangles[i].pos[k];
+            for (int e = 0; e < 3; e++) {
+                aabb.min.e[e] = MinFloat32(v.e[e], aabb.min.e[e]);
+                aabb.max.e[e] = MaxFloat32(v.e[e], aabb.max.e[e]);
+            }
+        }
     }
-    else if (depth > *maxDepth) {
-        *maxDepth = depth;
-    }
 
-    DynamicArray<RaycastTriangle, LinearAllocator> insideTriangles(tempAllocator);
+    return aabb;
+}
 
-    bvh->aabb.min = Vec3::one * 1e8;
-    bvh->aabb.max = -Vec3::one * 1e8;
+uint32 CountTrianglesInsideBox(Array<RaycastTriangle> triangles, Box box)
+{
+    uint32 count = 0;
     for (uint32 i = 0; i < triangles.size; i++) {
         bool inside = false;
         for (int k = 0; k < 3; k++) {
-            if (IsInsideInclusive(triangles[i].pos[k], minBox)) {
+            if (IsInsideInclusive(triangles[i].pos[k], box)) {
                 // Only 1 vertex needs to be inside for the whole triangle to be inside
                 inside = true;
                 break;
@@ -132,189 +149,217 @@ bool FillRaycastMeshBvh(RaycastMeshBvh* bvh, Box minBox, uint32 bvhMaxTriangles,
         }
 
         if (inside) {
-            for (int k = 0; k < 3; k++) {
-                const Vec3 v = triangles[i].pos[k];
-                for (int e = 0; e < 3; e++) {
-                    bvh->aabb.min.e[e] = MinFloat32(bvh->aabb.min.e[e], v.e[e]);
-                    bvh->aabb.max.e[e] = MaxFloat32(bvh->aabb.max.e[e], v.e[e]);
-                }
-            }
+            count++;
+        }
+    }
 
+    return count;
+}
+
+Array<RaycastTriangle> GetTrianglesInsideBox(Array<RaycastTriangle> triangles, Box box, LinearAllocator* allocator)
+{
+    DynamicArray<RaycastTriangle, LinearAllocator> insideTriangles(allocator);
+    for (uint32 i = 0; i < triangles.size; i++) {
+        bool inside = false;
+        for (int k = 0; k < 3; k++) {
+            if (IsInsideInclusive(triangles[i].pos[k], box)) {
+                // Only 1 vertex needs to be inside for the whole triangle to be inside
+                inside = true;
+                break;
+            }
+        }
+
+        if (inside) {
             insideTriangles.Append(triangles[i]);
         }
     }
 
-    // TODO examine the second case. # of triangles should decrease reasonably each partition,
-    // otherwise we're duplicating checks
-    if (insideTriangles.size <= bvhMaxTriangles || (!firstPass && insideTriangles.size == triangles.size)) {
-        bvh->child1 = nullptr;
-        bvh->child2 = nullptr;
-        bvh->triangles = allocator->NewArray<RaycastTriangle>(insideTriangles.size);
-        if (bvh->triangles.data == nullptr) {
-            return false;
-        }
-        bvh->triangles.CopyFrom(insideTriangles.ToArray());
+    return insideTriangles.ToArray();
+}
+
+bool DivideBvhTriangles(Array<RaycastTriangle> triangles, LinearAllocator* allocator,
+                        Array<RaycastTriangle>* outTriangles1, Array<RaycastTriangle>* outTriangles2)
+{
+    const Box aabb = CalculateAABBForTriangles(triangles);
+    const Vec3 aabbSize = aabb.max - aabb.min;
+    const int longestDimension = (aabbSize.x >= aabbSize.y && aabbSize.x >= aabbSize.z) ? 0
+        : ((aabbSize.y >= aabbSize.x && aabbSize.y >= aabbSize.z) ? 1 : 2);
+    const float32 halfLongestDimension = aabbSize.e[longestDimension] / 2.0f;
+
+    Box box1 = aabb;
+    box1.max.e[longestDimension] -= halfLongestDimension;
+    const uint32 countTriangles1 = CountTrianglesInsideBox(triangles, box1);
+    if (countTriangles1 == triangles.size) {
+        return false;
+    }
+    *outTriangles1 = GetTrianglesInsideBox(triangles, box1, allocator);
+
+    Box box2 = aabb;
+    box2.min.e[longestDimension] += halfLongestDimension;
+    const uint32 countTriangles2 = CountTrianglesInsideBox(triangles, box2);
+    if (countTriangles2 == triangles.size) {
+        return false;
+    }
+    *outTriangles2 = GetTrianglesInsideBox(triangles, box2, allocator);
+
+    return true;
+}
+
+bool FillRaycastBvhsRecursive(Array<RaycastTriangle> triangles, uint32 bvhMaxTriangles, uint32 depth, uint32* maxDepth,
+                              LinearAllocator* allocator, DynamicArray<RaycastBvh, LinearAllocator>* outBvhs,
+                              DynamicArray<RaycastTriangle, LinearAllocator>* outTriangles)
+{
+    if (depth > *maxDepth) {
+        *maxDepth = depth;
+    }
+
+    const uint32 bvhIndex = outBvhs->size;
+    outBvhs->Append();
+    (*outBvhs)[bvhIndex].aabb = CalculateAABBForTriangles(triangles);
+
+    if (triangles.size <= bvhMaxTriangles) {
+        (*outBvhs)[bvhIndex].startTriangle = outTriangles->size;
+        outTriangles->Append(triangles);
+        (*outBvhs)[bvhIndex].endTriangle = outTriangles->size;
+        (*outBvhs)[bvhIndex].skip = 1;
     }
     else {
-        const Vec3 boxSize = bvh->aabb.max - bvh->aabb.min;
-        const int longestDimension = (boxSize.x >= boxSize.y && boxSize.x >= boxSize.z) ? 0
-            : ((boxSize.y >= boxSize.x && boxSize.y >= boxSize.z) ? 1 : 2);
-        const float32 halfLongestDimension = boxSize.e[longestDimension] / 2.0f;
+        Array<RaycastTriangle> triangles1, triangles2;
+        if (DivideBvhTriangles(triangles, allocator, &triangles1, &triangles2)) {
+            const uint32 startBvh = outBvhs->size;
+            if (!FillRaycastBvhsRecursive(triangles1, bvhMaxTriangles, depth + 1, maxDepth,
+                                          allocator, outBvhs, outTriangles)) {
+                return false;
+            }
+            if (!FillRaycastBvhsRecursive(triangles2, bvhMaxTriangles, depth + 1, maxDepth,
+                                          allocator, outBvhs, outTriangles)) {
+                return false;
+            }
 
-        Box minBox1 = bvh->aabb;
-        minBox1.max.e[longestDimension] -= halfLongestDimension;
-        Box minBox2 = bvh->aabb;
-        minBox2.min.e[longestDimension] += halfLongestDimension;
-
-        bvh->child1 = allocator->New<RaycastMeshBvh>();
-        if (bvh->child1 == nullptr) {
-            return false;
+            (*outBvhs)[bvhIndex].startTriangle = 0;
+            (*outBvhs)[bvhIndex].endTriangle = 0;
+            (*outBvhs)[bvhIndex].skip = outBvhs->size - startBvh + 1;
         }
-        if (!FillRaycastMeshBvh(bvh->child1, minBox1, bvhMaxTriangles, false, depth + 1, maxDepth,
-                                insideTriangles.ToArray(), allocator, tempAllocator)) {
-            return false;
-        }
-
-        bvh->child2 = allocator->New<RaycastMeshBvh>();
-        if (bvh->child2 == nullptr) {
-            return false;
-        }
-        if (!FillRaycastMeshBvh(bvh->child2, minBox2, bvhMaxTriangles, false, depth + 1, maxDepth,
-                                insideTriangles.ToArray(), allocator, tempAllocator)) {
-            return false;
+        else {
+            (*outBvhs)[bvhIndex].startTriangle = outTriangles->size;
+            outTriangles->Append(triangles);
+            (*outBvhs)[bvhIndex].endTriangle = outTriangles->size;
+            (*outBvhs)[bvhIndex].skip = 1;
         }
     }
 
     return true;
 }
 
-RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
-                                      LinearAllocator* allocator, LinearAllocator* tempAllocator)
+bool FillRaycastBvhs(Array<RaycastTriangle> triangles, uint32 bvhMaxTriangles, uint32* maxDepth,
+                     LinearAllocator* allocator, DynamicArray<RaycastBvh, LinearAllocator>* outBvhs,
+                     DynamicArray<RaycastTriangle, LinearAllocator>* outTriangles)
 {
-    RaycastGeometry geometry = {};
+    *maxDepth = 0;
+    return FillRaycastBvhsRecursive(triangles, bvhMaxTriangles, 0, maxDepth, allocator, outBvhs, outTriangles);
+}
 
-    geometry.materialNames = allocator->NewArray<string>(obj.materials.size);
-    if (geometry.materialNames.data == nullptr) {
-        return geometry;
+bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
+                           RaycastGeometry* geometry, LinearAllocator* allocator, LinearAllocator* tempAllocator)
+{
+    // Fill material info
+    geometry->materialNames = allocator->NewArray<string>(obj.materials.size);
+    if (geometry->materialNames.data == nullptr) {
+        return false;
     }
-    geometry.materials = allocator->NewArray<RaycastMaterial>(obj.materials.size);
-    if (geometry.materials.data == nullptr) {
-        return geometry;
+    geometry->materials = allocator->NewArray<RaycastMaterial>(obj.materials.size);
+    if (geometry->materials.data == nullptr) {
+        return false;
     }
 
     for (uint32 i = 0; i < obj.materials.size; i++) {
         const_string materialName = obj.materials[i].name;
-        geometry.materialNames[i] = allocator->NewArray<char>(materialName.size);
-        MemCopy(geometry.materialNames[i].data, materialName.data, materialName.size);
+        geometry->materialNames[i] = allocator->NewArray<char>(materialName.size);
+        MemCopy(geometry->materialNames[i].data, materialName.data, materialName.size);
 
-        if (!GetMaterial(materialName, &geometry.materials[i])) {
+        if (!GetMaterial(materialName, &geometry->materials[i])) {
             LOG_ERROR("Unrecognized material: %.*s\n", materialName.size, materialName.data);
-            return geometry;
+            return false;
         }
     }
 
-    geometry.meshes = allocator->NewArray<RaycastMesh>(obj.models.size);
-    if (geometry.meshes.data == nullptr) {
-        return geometry;
+    // Fill mesh info
+    geometry->meshes = allocator->NewArray<RaycastMesh>(obj.models.size);
+    if (geometry->meshes.data == nullptr) {
+        return false;
     }
 
-    uint32 totalTriangles = 0;
-    uint32 totalBvhs = 0;
-    uint32 maxBvhTrianglesInd = obj.models.size;
-    uint32 maxBvhTriangles = 0;
-    uint32 totalBvhTriangles = 0;
-    uint32 maxBvhDepthInd = obj.models.size;
-    uint32 maxBvhDepth = 0;
-    uint32 maxBvhNodesInd = obj.models.size;
-    uint32 maxBvhNodes = 0;
+    DynamicArray<RaycastBvh, LinearAllocator> bvhs(tempAllocator);
+    DynamicArray<RaycastTriangle, LinearAllocator> triangles(tempAllocator);
+
+    // Geometry stats
+    uint32 trianglesTotal = 0;
 
     for (uint32 i = 0; i < obj.models.size; i++) {
         const_string name = obj.models[i].name;
-        RaycastMesh& mesh = geometry.meshes[i];
 
-        const uint32 numTriangles = obj.models[i].triangles.size + obj.models[i].quads.size * 2;
-        mesh.numTriangles = numTriangles;
-        totalTriangles += numTriangles;
-
-        Array<RaycastTriangle> triangles = tempAllocator->NewArray<RaycastTriangle>(numTriangles);
-        if (triangles.data == nullptr) {
-            LOG_ERROR("Failed to allocate triangles for raycast mesh %.*s\n", name.size, name.data);
-            geometry.meshes.data = nullptr;
-            return geometry;
+        const uint32 numMeshTriangles = obj.models[i].triangles.size + obj.models[i].quads.size * 2;
+        Array<RaycastTriangle> meshTriangles = tempAllocator->NewArray<RaycastTriangle>(numMeshTriangles);
+        if (meshTriangles.data == nullptr) {
+            return false;
         }
+        trianglesTotal += numMeshTriangles;
 
         for (uint32 j = 0; j < obj.models[i].triangles.size; j++) {
             const ObjTriangle& t = obj.models[i].triangles[j];
             const Vec3 normal = CalculateTriangleUnitNormal(t.v[0].pos, t.v[1].pos, t.v[2].pos);
 
             for (int k = 0; k < 3; k++) {
-                triangles[j].pos[k] = t.v[k].pos;
+                meshTriangles[j].pos[k] = t.v[k].pos;
             }
-            triangles[j].normal = normal;
-            triangles[j].materialIndex = t.materialIndex;
+            meshTriangles[j].normal = normal;
+            meshTriangles[j].materialIndex = t.materialIndex;
         }
+
         for (uint32 j = 0; j < obj.models[i].quads.size; j++) {
             const uint32 ind = obj.models[i].triangles.size + j * 2;
             const ObjQuad& q = obj.models[i].quads[j];
             const Vec3 normal = CalculateTriangleUnitNormal(q.v[0].pos, q.v[1].pos, q.v[2].pos);
 
             for (int k = 0; k < 3; k++) {
-                triangles[ind].pos[k] = q.v[k].pos;
+                meshTriangles[ind].pos[k] = q.v[k].pos;
             }
-            triangles[ind].normal = normal;
-            triangles[ind].materialIndex = q.materialIndex;
+            meshTriangles[ind].normal = normal;
+            meshTriangles[ind].materialIndex = q.materialIndex;
 
             for (int k = 0; k < 3; k++) {
                 const uint32 quadInd = (k + 2) % 4;
-                triangles[ind + 1].pos[k] = q.v[quadInd].pos;
+                meshTriangles[ind + 1].pos[k] = q.v[quadInd].pos;
             }
-            triangles[ind + 1].normal = normal;
-            triangles[ind + 1].materialIndex = q.materialIndex;
+            meshTriangles[ind + 1].normal = normal;
+            meshTriangles[ind + 1].materialIndex = q.materialIndex;
         }
 
-        const Box veryBigBox = { .min = -Vec3::one * 1e8, .max = Vec3::one * 1e8 };
+        RaycastMesh& mesh = geometry->meshes[i];
+        mesh.offset = Vec3::zero;
+        mesh.inverseQuat = Vec4 { Quat::one.x, Quat::one.y, Quat::one.z, Quat::one.w };
+        mesh.startBvh = bvhs.size;
+
         uint32 maxDepth;
-        if (!FillRaycastMeshBvh(&mesh.bvh, veryBigBox, bvhMaxTriangles, true, 0, &maxDepth,
-                                triangles, allocator, tempAllocator)) {
-            LOG_ERROR("Failed to fill raycast mesh box for mesh %.*s\n", name.size, name.data);
-            geometry.meshes.data = nullptr;
-            return geometry;
+        if (!FillRaycastBvhs(meshTriangles, bvhMaxTriangles, &maxDepth, tempAllocator, &bvhs, &triangles)) {
+            LOG_ERROR("Failed to fill BVHs for mesh %.*s\n", name.size, name.data);
+            return false;
         }
 
-        if (maxDepth > maxBvhDepth) {
-            maxBvhDepthInd = i;
-            maxBvhDepth = maxDepth;
-        }
-
-        uint32 numBvhNodes = 0;
-        DynamicArray<RaycastMeshBvh*, LinearAllocator> bvhStack(tempAllocator);
-        bvhStack.Append(&mesh.bvh);
-        while (bvhStack.size > 0) {
-            RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
-            bvhStack.RemoveLast();
-
-            if (bvh->child1 == nullptr) {
-                numBvhNodes++;
-                totalBvhTriangles += bvh->triangles.size;
-                if (bvh->triangles.size > maxBvhTriangles) {
-                    maxBvhTrianglesInd = i;
-                    maxBvhTriangles = bvh->triangles.size;
-                }
-            }
-            else {
-                bvhStack.Append(bvh->child1);
-                bvhStack.Append(bvh->child2);
-            }
-        }
-
-        totalBvhs += numBvhNodes;
-        if (numBvhNodes > maxBvhNodes) {
-            maxBvhNodesInd = i;
-            maxBvhNodes = numBvhNodes;
-        }
+        mesh.endBvh = bvhs.size;
     }
 
-    // Report BVH stats
+    geometry->triangles = allocator->NewArray<RaycastTriangle>(triangles.size);
+    geometry->triangles.CopyFrom(triangles.ToArray());
+
+    geometry->bvhs = allocator->NewArray<RaycastBvh>(bvhs.size);
+    geometry->bvhs.CopyFrom(bvhs.ToArray());
+
+    // Report geometry stats
+    LOG_INFO("BVH triangles / total triangles: %lu / %lu (%.02f %%)\n", triangles.size, trianglesTotal,
+             (float32)triangles.size / (float32)trianglesTotal * 100.0f);
+
+#if 0
     if (bvhMaxTriangles != UINT32_MAX_VALUE) {
         LOG_INFO("Total BVHs: %lu\n", totalBvhs);
         LOG_INFO("BVH triangles / total triangles: %lu / %lu (%.02f %%)\n", totalBvhTriangles, totalTriangles,
@@ -338,10 +383,12 @@ RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTri
                      maxBvhDepth, maxBvhDepthName.size, maxBvhDepthName.data);
         }
     }
+#endif
 
-    return geometry;
+    return true;
 }
 
+#if 0
 bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTriangle> triangles,
                   uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
@@ -401,7 +448,7 @@ bool TraverseMeshBvh(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 mi
     return hit;
 }
 
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, float32 maxDist,
+Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
                   const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE], const RaycastGeometry& geometry, RandomSeries* series)
 {
     ZoneScoped;
@@ -409,7 +456,7 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, uint32 bounces, float32 minDist, 
     float32 intensity = 1.0f;
     Vec3 color = Vec3::zero;
 
-    for (uint32 b = 0; b < bounces; b++) {
+    for (uint32 b = 0; b < BOUNCES_SPECULAR; b++) {
         // TODO I think this is causing artifacts, because we could be dividing by zero
         const Vec3 inverseRayDir = Reciprocal(rayDir);
 
@@ -458,8 +505,6 @@ struct RaycastThreadWorkCommon
     Vec3 filmUnitOffsetY;
     Vec3 cameraPos;
     uint32 width, height;
-    uint32 bounces;
-    float32 fill;
     float32 minDist;
     float32 maxDist;
 };
@@ -491,162 +536,121 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 
     for (uint32 y = minY; y < maxY; y++) {
         for (uint32 x = minX; x < maxX; x++) {
-            if (RandomUnilateral(&randomSeries) < common.fill) {
-                const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
-                const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
-                const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
-                const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
+            const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
+            const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
+            const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
+            const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
 
-                const Vec3 raycastColor = RaycastColor(common.cameraPos, rayDir, common.bounces,
-                                                       common.minDist, common.maxDist,
-                                                       bvhStack, *common.geometry, &randomSeries);
+            const Vec3 raycastColor = RaycastColor(common.cameraPos, rayDir, common.minDist, common.maxDist,
+                                                   bvhStack, *common.geometry, &randomSeries);
 
-                const uint32 pixelIndex = y * common.width + x;
-                work->colorHdr[pixelIndex] = raycastColor;
-            }
+            const uint32 pixelIndex = y * common.width + x;
+            work->colorHdr[pixelIndex] = raycastColor;
         }
     }
 }
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
+                    uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue)
 {
-    UNREFERENCED_PARAMETER(materialIndices);
     ZoneScoped;
-
     const uint32 numPixels = width * height;
 
     {
-        ZoneScopedN("PixelDecay");
-
-#if 0
-        for (uint32 i = 0; i < numPixels; i++) {
-            uint8* decay = &canvas->decay.data[i];
-            if (*decay != 0xff) {
-                (*decay) += 1;
-                if (*decay >= canvas->decayFrames) {
-                    canvas->colorHdr[i] = Vec3::zero;
-                    *decay = 0xff;
-                }
-            }
-        }
-#endif
-
+        ZoneScopedN("Clear");
+        // TODO make GPU clear pixels? eh, maybe not
         MemSet(canvas->colorHdr.data, 0, numPixels * sizeof(Vec3));
     }
 
-    TracyCZoneN(zoneProduceWork, "ProduceWork", true);
+    {
+        ZoneScopedN("ProduceWork");
 
-    const Quat inverseCameraRot = Inverse(cameraRot);
-    const Vec3 cameraUp = inverseCameraRot * Vec3::unitZ;
-    const Vec3 cameraForward = inverseCameraRot * Vec3::unitX;
-    const Vec3 cameraLeft = inverseCameraRot * Vec3::unitY;
+        const Quat inverseCameraRot = Inverse(cameraRot);
+        const Vec3 cameraUp = inverseCameraRot * Vec3::unitZ;
+        const Vec3 cameraForward = inverseCameraRot * Vec3::unitX;
+        const Vec3 cameraLeft = inverseCameraRot * Vec3::unitY;
 
-    const float32 filmDist = 1.0f;
-    const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
-    const float32 filmWidth = filmHeight * (float32)width / (float32)height;
+        const float32 filmDist = 1.0f;
+        const float32 filmHeight = tanf(fov / 2.0f) * 2.0f;
+        const float32 filmWidth = filmHeight * (float32)width / (float32)height;
 
-    const Vec3 filmTopLeft = cameraPos + cameraForward * filmDist
-        + (filmWidth / 2.0f) * cameraLeft + (filmHeight / 2.0f) * cameraUp;
-    const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)(width - 1);
-    const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)(height - 1);
+        const Vec3 filmTopLeft = cameraPos + cameraForward * filmDist
+            + (filmWidth / 2.0f) * cameraLeft + (filmHeight / 2.0f) * cameraUp;
+        const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)(width - 1);
+        const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)(height - 1);
 
-    RaycastThreadWorkCommon workCommon = {
-        .geometry = &geometry,
-        .filmTopLeft = filmTopLeft,
-        .filmUnitOffsetX = filmUnitOffsetX,
-        .filmUnitOffsetY = filmUnitOffsetY,
-        .cameraPos = cameraPos,
-        .width = width,
-        .height = height,
-        .bounces = canvas->bounces,
-        .fill = canvas->screenFill,
-        .minDist = 0.0f,
-        .maxDist = 20.0f,
-    };
+        RaycastThreadWorkCommon workCommon = {
+            .geometry = &geometry,
+            .filmTopLeft = filmTopLeft,
+            .filmUnitOffsetX = filmUnitOffsetX,
+            .filmUnitOffsetY = filmUnitOffsetY,
+            .cameraPos = cameraPos,
+            .width = width,
+            .height = height,
+            .minDist = 0.0f,
+            .maxDist = 20.0f,
+        };
 
-    RandomSeries series;
-    const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
-    series.state = seed;
-    series.state = (uint32)rand();
+        RandomSeries series;
+        const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
+        series.state = seed;
+        series.state = (uint32)rand();
 
-    const uint32 WORK_TILE_SIZE = 16;
-    const uint32 wholeTilesX = width / WORK_TILE_SIZE;
-    const uint32 wholeTilesY = height / WORK_TILE_SIZE;
-    const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
-    Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
+        const uint32 WORK_TILE_SIZE = 16;
+        const uint32 wholeTilesX = width / WORK_TILE_SIZE;
+        const uint32 wholeTilesY = height / WORK_TILE_SIZE;
+        const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
+        Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
 
-    for (uint32 tileY = 0; tileY < wholeTilesY; tileY++) {
-        for (uint32 tileX = 0; tileX < wholeTilesX; tileX++) {
-            const uint32 workIndex = tileY * wholeTilesX + tileX;
-            RaycastThreadWork* work = &workEntries[workIndex];
-            work->common = &workCommon;
-            work->colorHdr = canvas->colorHdr.data,
-            work->randomSeries.state = RandomUInt32(&series);
-            work->minX = tileX * WORK_TILE_SIZE;
-            work->maxX = (tileX + 1) * WORK_TILE_SIZE;
-            work->minY = tileY * WORK_TILE_SIZE;
-            work->maxY = (tileY + 1) * WORK_TILE_SIZE;
+        for (uint32 tileY = 0; tileY < wholeTilesY; tileY++) {
+            for (uint32 tileX = 0; tileX < wholeTilesX; tileX++) {
+                const uint32 workIndex = tileY * wholeTilesX + tileX;
+                RaycastThreadWork* work = &workEntries[workIndex];
+                work->common = &workCommon;
+                work->colorHdr = canvas->colorHdr.data,
+                work->randomSeries.state = RandomUInt32(&series);
+                work->minX = tileX * WORK_TILE_SIZE;
+                work->maxX = (tileX + 1) * WORK_TILE_SIZE;
+                work->minY = tileY * WORK_TILE_SIZE;
+                work->maxY = (tileY + 1) * WORK_TILE_SIZE;
 
-            if (!TryAddWork(queue, &RaycastThreadProc, work)) {
-                CompleteAllWork(queue, 0);
-                tileX--;
-                continue;
+                if (!TryAddWork(queue, &RaycastThreadProc, work)) {
+                    CompleteAllWork(queue, 0);
+                    tileX--;
+                    continue;
+                }
             }
         }
     }
-
-    TracyCZoneEnd(zoneProduceWork);
 
     {
         ZoneScopedN("FinishWork");
         CompleteAllWork(queue, 0);
     }
 
-    TracyCZoneN(zoneHdrTranslate, "TranslateHdr", true);
+    {
+        ZoneScopedN("TranslateHdr");
 
-    float32 maxColor = 1.0f;
-    for (uint32 i = 0; i < numPixels; i++) {
-        const Vec3 colorHdr = canvas->colorHdr[i];
-        maxColor = MaxFloat32(maxColor, colorHdr.r);
-        maxColor = MaxFloat32(maxColor, colorHdr.g);
-        maxColor = MaxFloat32(maxColor, colorHdr.b);
-    }
+        float32 maxColor = 1.0f;
+        for (uint32 i = 0; i < numPixels; i++) {
+            const Vec3 colorHdr = canvas->colorHdr[i];
+            maxColor = MaxFloat32(maxColor, colorHdr.r);
+            maxColor = MaxFloat32(maxColor, colorHdr.g);
+            maxColor = MaxFloat32(maxColor, colorHdr.b);
+        }
 
-    for (uint32 i = 0; i < numPixels; i++) {
-        const Vec3 colorNormalized = canvas->colorHdr[i] / maxColor;
-        // TODO gamma correction?
-        const uint8 r = (uint8)(colorNormalized.r * 255.0f);
-        const uint8 g = (uint8)(colorNormalized.g * 255.0f);
-        const uint8 b = (uint8)(colorNormalized.b * 255.0f);
-        pixels[i] = ((uint32)0xff << 24) + ((uint32)b << 16) + ((uint32)g << 8) + r;
-    }
-
-    TracyCZoneEnd(zoneHdrTranslate);
-}
-
-uint32 CountSubBvhs(const RaycastMeshBvh* root, LinearAllocator* allocator)
-{
-    SCOPED_ALLOCATOR_RESET(*allocator);
-
-    uint32 count = 0;
-    DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(allocator);
-    bvhStack.Append(root);
-
-    while (bvhStack.size > 0) {
-        const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
-        bvhStack.RemoveLast();
-        count++;
-
-        if (bvh->child1 != nullptr) {
-            bvhStack.Append(bvh->child1);
-            bvhStack.Append(bvh->child2);
+        for (uint32 i = 0; i < numPixels; i++) {
+            const Vec3 colorNormalized = canvas->colorHdr[i] / maxColor;
+            // TODO gamma correction?
+            const uint8 r = (uint8)(colorNormalized.r * 255.0f);
+            const uint8 g = (uint8)(colorNormalized.g * 255.0f);
+            const uint8 b = (uint8)(colorNormalized.b * 255.0f);
+            pixels[i] = ((uint32)0xff << 24) + ((uint32)b << 16) + ((uint32)g << 8) + r;
         }
     }
-
-    return count - 1;
 }
+#endif
 
 bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,
                           const RaycastGeometry& geometry, LinearAllocator* allocator, VulkanRaytracePipeline* pipeline)
@@ -678,62 +682,38 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         }
     }
 
-    // triangles, BVHs, meshes
+    // meshes, triangles, BVHs
     {
         SCOPED_ALLOCATOR_RESET(*allocator);
 
-        DynamicArray<ComputeTriangle, LinearAllocator> triangles(allocator);
-        DynamicArray<ComputeBvh, LinearAllocator> bvhs(allocator);
         pipeline->meshes.Clear();
-        DynamicArray<const RaycastMeshBvh*, LinearAllocator> bvhStack(allocator);
-
         for (uint32 i = 0; i < geometry.meshes.size; i++) {
-            const RaycastMesh& mesh = geometry.meshes[i];
-
+            const RaycastMesh& srcMesh = geometry.meshes[i];
             ComputeMesh* newMesh = pipeline->meshes.Append();
-            newMesh->offset = Vec3::zero;
-            newMesh->quat = Vec4 {
-                Quat::one.x, Quat::one.y, Quat::one.z, Quat::one.w
-            };
-            newMesh->startBvh = bvhs.size;
+            newMesh->offset = srcMesh.offset;
+            newMesh->inverseQuat = srcMesh.inverseQuat;
+            newMesh->startBvh = srcMesh.startBvh;
+            newMesh->endBvh = srcMesh.endBvh;
+        }
 
-            bvhStack.Clear();
-            bvhStack.Append(&mesh.bvh);
-            while (bvhStack.size > 0) {
-                const RaycastMeshBvh* bvh = bvhStack[bvhStack.size - 1];
-                bvhStack.RemoveLast();
+        Array<ComputeTriangle> triangles = allocator->NewArray<ComputeTriangle>(geometry.triangles.size);
+        for (uint32 i = 0; i < geometry.triangles.size; i++) {
+            const RaycastTriangle& srcTriangle = geometry.triangles[i];
+            triangles[i].a = srcTriangle.pos[0];
+            triangles[i].b = srcTriangle.pos[1];
+            triangles[i].c = srcTriangle.pos[2];
+            triangles[i].normal = srcTriangle.normal;
+            triangles[i].materialIndex = srcTriangle.materialIndex;
+        }
 
-                ComputeBvh* newBvh = bvhs.Append();
-                newBvh->aabbMin = bvh->aabb.min;
-                newBvh->aabbMax = bvh->aabb.max;
-                newBvh->skip = CountSubBvhs(bvh, allocator) + 1;
-
-                if (bvh->child1 == nullptr) {
-                    newBvh->startTriangle = triangles.size;
-
-                    for (uint32 j = 0; j < bvh->triangles.size; j++) {
-                        const RaycastTriangle& srcTriangle = bvh->triangles[j];
-                        ComputeTriangle* dstTriangle = triangles.Append();
-                        dstTriangle->a = srcTriangle.pos[0];
-                        dstTriangle->b = srcTriangle.pos[1];
-                        dstTriangle->c = srcTriangle.pos[2];
-                        dstTriangle->normal = srcTriangle.normal;
-                        dstTriangle->materialIndex = srcTriangle.materialIndex;
-                    }
-
-                    newBvh->endTriangle = triangles.size;
-                }
-                else {
-                    newBvh->startTriangle = 0;
-                    newBvh->endTriangle = 0;
-
-                    // pre-order traversal
-                    bvhStack.Append(bvh->child2);
-                    bvhStack.Append(bvh->child1);
-                }
-            }
-
-            newMesh->endBvh = bvhs.size;
+        Array<ComputeBvh> bvhs = allocator->NewArray<ComputeBvh>(geometry.bvhs.size);
+        for (uint32 i = 0; i < geometry.bvhs.size; i++) {
+            const RaycastBvh& srcBvh = geometry.bvhs[i];
+            bvhs[i].aabbMin = srcBvh.aabb.min;
+            bvhs[i].aabbMax = srcBvh.aabb.max;
+            bvhs[i].startTriangle = srcBvh.startTriangle;
+            bvhs[i].endTriangle = srcBvh.endTriangle;
+            bvhs[i].skip = srcBvh.skip;
         }
 
         const VkDeviceSize triangleBufferSize = triangles.size * sizeof(ComputeTriangle);
@@ -1060,7 +1040,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
     {
         VkFenceCreateInfo fenceCreateInfo = {};
         fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fenceCreateInfo.flags = 0;//VK_FENCE_CREATE_SIGNALED_BIT;
+        fenceCreateInfo.flags = 0;
 
         if (vkCreateFence(window.device, &fenceCreateInfo, nullptr, &pipeline->fence) != VK_SUCCESS) {
             LOG_ERROR("vkCreateFence failed\n");

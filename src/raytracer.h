@@ -6,6 +6,46 @@
 
 const uint32 BOX_MAX_TRIANGLES = 32;
 
+struct RaycastMaterial
+{
+    Vec3 albedo;
+    float32 smoothness;
+    Vec3 emissionColor;
+    float32 emission;
+};
+
+struct RaycastTriangle
+{
+    Vec3 pos[3];
+    Vec3 normal;
+    uint32 materialIndex;
+};
+
+struct RaycastBvh
+{
+    Box aabb;
+    uint32 startTriangle;
+    uint32 endTriangle;
+    uint32 skip;
+};
+
+struct RaycastMesh
+{
+    Vec4 inverseQuat;
+    Vec3 offset;
+    uint32 startBvh;
+    uint32 endBvh;
+};
+
+struct RaycastGeometry
+{
+    Array<string> materialNames;
+    Array<RaycastMaterial> materials;
+    Array<RaycastTriangle> triangles;
+    Array<RaycastBvh> bvhs;
+    Array<RaycastMesh> meshes;
+};
+
 struct ComputeMaterial
 {
     Vec3 albedo;
@@ -16,7 +56,7 @@ struct ComputeMaterial
 
 struct ComputeMesh
 {
-    Vec4 quat;
+    Vec4 inverseQuat;
 	Vec3 offset;
     uint32 startBvh;
     uint32 endBvh;
@@ -39,58 +79,14 @@ struct ComputeUbo
     alignas(16) ComputeMesh meshes[MAX_MESHES];
 };
 
-struct RaycastMaterial
-{
-    Vec3 albedo;
-    float32 smoothness;
-    Vec3 emissionColor;
-    float32 emission;
-};
-
-struct RaycastTriangle
-{
-    Vec3 pos[3];
-    Vec3 normal;
-    uint32 materialIndex;
-};
-
-struct RaycastMeshBvh
-{
-    Box aabb;
-    RaycastMeshBvh* child1;
-    RaycastMeshBvh* child2;
-    Array<RaycastTriangle> triangles;
-};
-
-struct RaycastMesh
-{
-    RaycastMeshBvh bvh;
-    uint32 numTriangles;
-};
-
-struct RaycastGeometry
-{
-    Array<string> materialNames;
-    Array<RaycastMaterial> materials;
-    Array<RaycastMesh> meshes;
-};
-
-bool GetMaterial(const_string name, RaycastMaterial* material);
-
-RaycastGeometry CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTriangles,
-                                      LinearAllocator* allocator, LinearAllocator* tempAllocator);
+bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 boxMaxTriangles,
+                           RaycastGeometry* geometry, LinearAllocator* allocator, LinearAllocator* tempAllocator);
 
 struct CanvasState
 {
     static const uint32 MAX_WIDTH = 3840;
     static const uint32 MAX_HEIGHT = 2160;
     static const uint32 MAX_PIXELS = MAX_WIDTH * MAX_HEIGHT;
-
-    uint32 prevSeed;
-
-    float32 screenFill;
-    uint8 decayFrames;
-    uint32 bounces;
 
     float32 test1;
     float32 test2;
@@ -132,5 +128,5 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline);
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    const uint8* materialIndices, uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
+                    uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue);

@@ -14,15 +14,13 @@
 
 #define ENABLE_THREADS 1
 
-#define DISCRETE_GPU 1
-
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
 const int WINDOW_START_WIDTH  = 1024;
 const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
-const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(2);
+const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(4);
 
 struct StartSceneInfo
 {
@@ -99,23 +97,18 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
 
     appState->arenaAllocator.Clear();
 
-    RaycastGeometry geometry = CreateRaycastGeometry(obj, BOX_MAX_TRIANGLES, &appState->arenaAllocator, allocator);
-    if (geometry.meshes.data == nullptr) {
+    RaycastGeometry geometry;
+    if (!CreateRaycastGeometry(obj, BOX_MAX_TRIANGLES, &geometry, &appState->arenaAllocator, allocator)) {
         LOG_ERROR("Failed to construct raycast geometry from obj for scene %.*s\n", scene.size, scene.data);
         return false;
     }
-
-    uint32 totalTriangles = 0;
-    for (uint32 i = 0; i < geometry.meshes.size; i++) {
-        totalTriangles += geometry.meshes[i].numTriangles;
-    }
-    LOG_INFO("Loaded raycast geometry for scene \"%.*s\" - %lu meshes, %lu total triangles\n",
-             scene.size, scene.data, geometry.meshes.size, totalTriangles);
     appState->raycastGeometry = geometry;
 
     VulkanRaytracePipeline* raytracePipeline = &appState->vulkanAppState.raytracePipeline;
     VulkanMeshPipeline* meshPipeline = &appState->vulkanAppState.meshPipeline;
     VulkanCompositePipeline* compositePipeline = &appState->vulkanAppState.compositePipeline;
+
+    vkDeviceWaitIdle(window.device);
 
     UnloadCompositePipelineSwapchain(window.device, compositePipeline);
     UnloadMeshPipelineSwapchain(window.device, meshPipeline);
@@ -185,10 +178,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->cameraAngles = START_SCENE_INFO.angles;
         appState->fovDegrees = 60.0f;
 
-        appState->canvas.screenFill = 0.5f;
-        appState->canvas.decayFrames = 2;
-        appState->canvas.bounces = 4;
-
         appState->canvas.test1 = 0.0f;
         appState->canvas.test2 = 0.0f;
         appState->canvas.test3 = 0.0f;
@@ -209,9 +198,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->debugView = false;
         LockCursor(false);
 
-        appState->inputScreenFillState.value = appState->canvas.screenFill;
-        appState->inputDecayFramesState.Initialize(appState->canvas.decayFrames);
-        appState->inputBouncesState.Initialize(appState->canvas.bounces);
         appState->inputSceneDropdownState.selected = 1; // TODO depends on start scene, really
 
         memory->initialized = true;
@@ -326,30 +312,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         bool cursorLocked = IsCursorLocked();
         if (panelDebugInfo.Checkbox(&cursorLocked, ToString("cam lock (ESC)"))) {
             LockCursor(cursorLocked);
-        }
-
-        panelDebugInfo.Text(string::empty);
-
-        panelDebugInfo.Text(ToString("Screen fill"));
-        if (panelDebugInfo.SliderFloat(&appState->inputScreenFillState, 0.0f, 1.0f)) {
-            appState->canvas.screenFill = appState->inputScreenFillState.value;
-        }
-
-        panelDebugInfo.Text(ToString("Decay frames (0 - 255)"));
-        if (panelDebugInfo.InputInt(&appState->inputDecayFramesState)) {
-            const int value = appState->inputDecayFramesState.value;
-            if (value > 0 && value <= 255) {
-                appState->canvas.decayFrames = (uint8)appState->inputDecayFramesState.value;
-            }
-        }
-
-        panelDebugInfo.Text(ToString("Bounces (at least 1)"));
-        if (panelDebugInfo.InputInt(&appState->inputBouncesState)) {
-            const int value = appState->inputBouncesState.value;
-            if (value > 0) {
-                appState->canvas.bounces = appState->inputBouncesState.value;
-                LOG_INFO("Set bounces: %d\n", appState->canvas.bounces);
-            }
         }
 
         panelDebugInfo.Text(string::empty);
@@ -478,33 +440,18 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     }
 
 #if 0
-    // Ray traced rendering
+    // CPU raytracing
     {
         ZoneScopedN("RaytracedRendering");
 
         LinearAllocator allocator(transientState->scratch);
-
-        uint8* materialIndices = allocator.New<uint8>(screenSize.x * screenSize.y);
-#if !DISCRETE_GPU
-        {
-            ZoneScopedN("ReadMaterialIndices");
-
-            const uint32 materialIndicesSize = screenSize.x * screenSize.y * sizeof(uint8);
-            const VkDeviceMemory& materialIndexMemory = appState->vulkanAppState.meshPipeline.materialIndexImageDstMemory;
-
-            void* data;
-            vkMapMemory(vulkanState.window.device, materialIndexMemory, 0, materialIndicesSize, 0, &data);
-            MemCopy(materialIndices, data, materialIndicesSize);
-            vkUnmapMemory(vulkanState.window.device, materialIndexMemory);
-        }
-#endif
 
         const uint32 numBytes = screenSize.x * screenSize.y * 4;
         void* imageMemory;
         vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
         uint32* pixels = (uint32*)imageMemory;
 
-        RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry, materialIndices,
+        RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
                        screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
         vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
@@ -570,10 +517,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             0.1f * Sin32(appState->elapsedTime / 23.0f),
             0.0f
         };
-        const Quat tetrahedronRot = QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ);
+        const Quat tetrahedronRotInv = Inverse(QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ));
         computeUbo->meshes[6].offset = -tetrahedronPos;
-        computeUbo->meshes[6].quat = Vec4 {
-            tetrahedronRot.x, tetrahedronRot.y, tetrahedronRot.z, tetrahedronRot.w
+        computeUbo->meshes[6].inverseQuat = Vec4 {
+            tetrahedronRotInv.x, tetrahedronRotInv.y, tetrahedronRotInv.z, tetrahedronRotInv.w
         };
 
         void* data;
@@ -870,8 +817,8 @@ APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)
         return false;
     }
 
-    RaycastGeometry geometry = CreateRaycastGeometry(obj, BOX_MAX_TRIANGLES, &allocator, &allocator);
-    if (geometry.meshes.data == nullptr) {
+    RaycastGeometry geometry;
+    if (!CreateRaycastGeometry(obj, BOX_MAX_TRIANGLES, &geometry, &allocator, &allocator)) {
         LOG_ERROR("Failed to load geometry from obj\n");
         return false;
     }
