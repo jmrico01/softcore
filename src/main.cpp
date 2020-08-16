@@ -439,7 +439,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
     }
 
-#if 0
+#if 1
     // CPU raytracing
     {
         ZoneScopedN("RaytracedRendering");

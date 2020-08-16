@@ -7,8 +7,10 @@
 #include <Tracy.hpp>
 #include <TracyC.h>
 
+#define SAMPLES_DIFFUSE 1
+#define SAMPLES_SPECULAR 1
 #define BOUNCES_DIFFUSE 1
-#define BOUNCES_SPECULAR 2
+#define BOUNCES_SPECULAR 1
 
 struct ComputeBvh
 {
@@ -77,6 +79,53 @@ float32 RandomUnilateral(RandomSeries* series)
 float32 RandomBilateral(RandomSeries* series)
 {
     return 2.0f * RandomUnilateral(series) - 1.0f;
+}
+
+Vec3 RandomInUnitSphereSurface(RandomSeries* series)
+{
+	const float32 angle = RandomUnilateral(series) * 2.0f * PI_F;
+	const float32 z = RandomBilateral(series);
+	const float32 r = Sqrt32(1.0f - z * z);
+	return Vec3 { r * Cos32(angle), r * Sin32(angle), z };
+}
+
+float32 pow3(float32 x)
+{
+	return x * x * x;
+}
+
+float32 pow4(float32 x)
+{
+	return x * x * x * x;
+}
+
+Vec3 Reflect(Vec3 dir, Vec3 normal)
+{
+    return dir - 2.0f * Dot(dir, normal) * normal;
+}
+
+Vec3 GetNewRayDirDiffuse(Vec3 hitNormal, RandomSeries* series)
+{
+	return Normalize(hitNormal + RandomInUnitSphereSurface(series));
+}
+
+Vec3 GetNewRayDirSpecular(Vec3 rayDir, Vec3 hitNormal, float32 smoothness, RandomSeries* series)
+{
+	// Gamma is a random variable between 0 and pi/2, that is picked from a distribution which is
+	// lerp between uniform and gaussian w/ fancy params, based on parameter smoothness
+	const float32 oneMinusS = 1.0f - smoothness;
+	const float32 c = 1.0f / (pow3(oneMinusS)) - 1.0f;
+	const float32 x = RandomUnilateral(series);
+	const float32 gamma = Lerp(1.0f - x, Exp32(-c * x * x), smoothness) * PI_F / 2.0f;
+	const float32 phi = RandomUnilateral(series) * 2.0f * PI_F;
+	const Vec3 pureBounce = Reflect(rayDir, hitNormal);
+
+    Quat quat = QuatFromAngleUnitAxis(gamma, Vec3::unitZ);
+	quat = QuatFromAngleUnitAxis(phi, Vec3::unitX) * quat;
+    // TODO hardcode unitX here?
+	quat = QuatRotBetweenVectors(pureBounce, Vec3::unitX) * quat;
+
+	return quat * Vec3::unitX;
 }
 
 bool GetMaterial(const_string name, RaycastMaterial* material)
@@ -337,7 +386,7 @@ bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
 
         RaycastMesh& mesh = geometry->meshes[i];
         mesh.offset = Vec3::zero;
-        mesh.inverseQuat = Vec4 { Quat::one.x, Quat::one.y, Quat::one.z, Quat::one.w };
+        mesh.inverseQuat = Quat::one;
         mesh.startBvh = bvhs.size;
 
         uint32 maxDepth;
@@ -388,118 +437,154 @@ bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
     return true;
 }
 
-#if 0
-bool HitTriangles(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, Array<RaycastTriangle> triangles,
-                  uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
+void TraverseMeshes(Vec3 rayOrigin, Vec3 rayDir, const RaycastGeometry& geometry, float32 minDist,
+                    uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
 {
-    bool hit = false;
+	for (uint32 m = 0; m < geometry.meshes.size; m++) {
+		const RaycastMesh mesh = geometry.meshes[m];
+		const Vec3 meshRayOrigin = mesh.inverseQuat * (rayOrigin + mesh.offset);
+		const Vec3 meshRayDir = mesh.inverseQuat * rayDir;
+		const Vec3 meshInverseRayDir = Reciprocal(meshRayDir);
 
-    for (uint32 i = 0; i < triangles.size; i++) {
-        const RaycastTriangle& triangle = triangles[i];
-        const float32 dotNegRayNormal = Dot(rayDir, triangle.normal);
-        if (dotNegRayNormal > 0.0f) {
-            continue;
-        }
+		uint32 i = mesh.startBvh;
+		while (i < mesh.endBvh) {
+			const RaycastBvh bvh = geometry.bvhs[i];
 
-        float32 t;
-        const bool tIntersect = RayTriangleIntersection(rayOrigin, rayDir,
-                                                        triangle.pos[0], triangle.pos[1], triangle.pos[2], &t);
-        UNREFERENCED_PARAMETER(minDist);
-        if (tIntersect && t > minDist && t < *hitDist) {
-            *hitMaterialIndex = triangle.materialIndex;
-            *hitNormal = triangle.normal;
-            *hitDist = t;
-            hit = true;
-        }
-    }
+			float32 tMin, tMax;
+			const bool aabbHit = RayAABBIntersection(meshRayOrigin, meshInverseRayDir, bvh.aabb, &tMin, &tMax);
+			if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < *hitDist) {
+				const uint32 tStart = bvh.startTriangle;
+				const uint32 tEnd = bvh.endTriangle;
+				for (uint32 j = tStart; j < tEnd; j++) {
+                    const RaycastTriangle& triangle = geometry.triangles[j];
+					const float32 dotNegRayNormal = Dot(meshRayDir, triangle.normal);
+					if (dotNegRayNormal <= 0.0) {
+						float32 t;
+						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, meshRayDir,
+                                                                         triangle.pos[0],
+                                                                         triangle.pos[1],
+                                                                         triangle.pos[2],
+                                                                         &t);
+						if (triangleHit && t > minDist && t < *hitDist) {
+							*hitMaterialIndex = triangle.materialIndex;
+							*hitNormal = triangle.normal;
+							*hitDist = t;
+						}
+					}
+				}
 
-    return hit;
+				i++;
+			}
+			else {
+				i += bvh.skip;
+			}
+		}
+	}
 }
 
-const uint32 BVH_STACK_SIZE = 4096;
-
-bool TraverseMeshBvh(Vec3 rayOrigin, Vec3 rayDir, Vec3 inverseRayDir, float32 minDist,
-                     const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE],
-                     uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
+Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist, const RaycastGeometry& geometry,
+                  RandomSeries* series)
 {
-    uint32 n = 1;
-
-    bool hit = false;
-    while (n > 0) {
-        const RaycastMeshBvh* bvh = bvhStack[--n];
-
-        float32 tMin, tMax;
-        const bool intersect = RayAxisAlignedBoxIntersection(rayOrigin, inverseRayDir, bvh->aabb, &tMin, &tMax);
-        if (!intersect || (tMin < 0.0f && tMax < 0.0f) || tMin > *hitDist) {
-            continue;
-        }
-
-        if (bvh->child1 == nullptr) {
-            if (HitTriangles(rayOrigin, rayDir, minDist, bvh->triangles, hitMaterialIndex, hitNormal, hitDist)) {
-                hit = true;
-            }
-        }
-        else {
-            bvhStack[n++] = bvh->child1;
-            bvhStack[n++] = bvh->child2;
-        }
-    }
-
-    return hit;
-}
-
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
-                  const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE], const RaycastGeometry& geometry, RandomSeries* series)
-{
+    UNREFERENCED_PARAMETER(series);
     ZoneScoped;
 
-    float32 intensity = 1.0f;
-    Vec3 color = Vec3::zero;
+    const uint32 MAX_MATERIALS = geometry.materials.size;
 
-    for (uint32 b = 0; b < BOUNCES_SPECULAR; b++) {
-        // TODO I think this is causing artifacts, because we could be dividing by zero
-        const Vec3 inverseRayDir = Reciprocal(rayDir);
+	const float32 weightDiffuse = 0.5f;
+	const float32 weightSpecular = 1.0f - weightDiffuse;
+	const float32 smoothnessDiffuse = 0.2f;
 
-        uint32 hitMaterialIndex = geometry.materials.size;
-        Vec3 hitNormal = Vec3::zero;
-        float32 hitDist = maxDist;
-        for (uint32 i = 0; i < geometry.meshes.size; i++) {
-            const RaycastMesh& mesh = geometry.meshes[i];
-            bvhStack[0] = &mesh.bvh;
-            TraverseMeshBvh(rayOrigin, rayDir, inverseRayDir, minDist, bvhStack,
-                            &hitMaterialIndex, &hitNormal, &hitDist);
-        }
+    uint32 hitMaterialIndex = MAX_MATERIALS;
+    Vec3 hitNormal;
+	float hitDist = maxDist;
+	TraverseMeshes(rayOrigin, rayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
 
-        if (hitMaterialIndex == geometry.materials.size) {
-            break;
-        }
+    const RaycastMaterial* hitMaterial;
+	if (hitMaterialIndex == MAX_MATERIALS) {
+        return Vec3::zero;
+	}
+	else {
+        hitMaterial = &geometry.materials[hitMaterialIndex];
+		if (hitMaterial->emission > 0.0) {
+			return hitMaterial->emission * hitMaterial->emissionColor;
+		}
+	}
 
-        const RaycastMaterial& hitMaterial = geometry.materials[hitMaterialIndex];
-        if (hitMaterial.emission > 0.0f) {
-            color = hitMaterial.emission * hitMaterial.emissionColor * intensity;
-            break;
-        }
-        else {
-            intensity *= 0.5f;
-            rayOrigin += rayDir * hitDist;
+	rayOrigin += rayDir * hitDist;
+	Vec3 albedoMultDiffuse = hitMaterial->albedo;
+	Vec3 albedoMultSpecular = hitMaterial->albedo;
+	const float32 sampleWeightDiffuse = 1.0 / SAMPLES_DIFFUSE * weightDiffuse;
+	const float32 sampleWeightSpecular = 1.0 / SAMPLES_SPECULAR * weightSpecular;
+	const Vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, series);
+	const Vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial->smoothness, series);
 
-            const Quat xToNormal = QuatRotBetweenVectors(Vec3::unitX, hitNormal);
-            const Vec3 pureBounce = rayDir - 2.0f * Dot(rayDir, hitNormal) * hitNormal;
-            const Vec3 randomBounce = xToNormal * NormalizeOrZero(Vec3 {
-                                                                      RandomUnilateral(series),
-                                                                      RandomBilateral(series),
-                                                                      RandomBilateral(series),
-                                                                  });
-            rayDir = NormalizeOrZero(Lerp(randomBounce, pureBounce, hitMaterial.smoothness));
-        }
-    }
+	Vec3 color = Vec3::zero;
 
-    return color;
+	// Diffuse
+	for (uint32 s = 0; s < SAMPLES_DIFFUSE; s++) {
+		Vec3 sampleRayOrigin = rayOrigin;
+		Vec3 sampleRayDir = sampleRayDirDiffuse;
+
+		for (uint32 i = 0; i < BOUNCES_DIFFUSE; i++) {
+			hitMaterialIndex = MAX_MATERIALS;
+			hitDist = maxDist;
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+
+			if (hitMaterialIndex == MAX_MATERIALS) {
+				break;
+			}
+			else {
+				const RaycastMaterial& hitMaterialD = geometry.materials[hitMaterialIndex];
+				if (hitMaterialD.emission > 0.0) {
+					color += hitMaterialD.emission * sampleWeightDiffuse
+                        * Multiply(hitMaterialD.emissionColor, albedoMultDiffuse);
+                    break;
+				}
+				else if (i != BOUNCES_DIFFUSE - 1) {
+					albedoMultDiffuse = Multiply(albedoMultDiffuse, hitMaterialD.albedo);
+					sampleRayOrigin += sampleRayDir * hitDist;
+					sampleRayDir = GetNewRayDirDiffuse(hitNormal, series);
+				}
+			}
+		}
+	}
+
+	// Specular
+	for (uint32 s = 0; s < SAMPLES_SPECULAR; s++) {
+		Vec3 sampleRayOrigin = rayOrigin;
+		Vec3 sampleRayDir = sampleRayDirSpecular;
+
+		for (uint32 i = 0; i < BOUNCES_SPECULAR; i++) {
+			hitMaterialIndex = MAX_MATERIALS;
+			hitDist = maxDist;
+			TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+
+			if (hitMaterialIndex == MAX_MATERIALS) {
+				break;
+			}
+			else {
+				const RaycastMaterial& hitMaterialS = geometry.materials[hitMaterialIndex];
+				if (hitMaterialS.emission > 0.0) {
+					color += hitMaterialS.emission * sampleWeightSpecular
+                        * Multiply(hitMaterialS.emissionColor, albedoMultSpecular);
+					break;
+				}
+				else if (i != BOUNCES_SPECULAR - 1) {
+					albedoMultSpecular = Multiply(albedoMultSpecular, hitMaterialS.albedo);
+					sampleRayOrigin += sampleRayDir * hitDist;
+					sampleRayDir = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterialS.smoothness, series);
+				}
+			}
+		}
+	}
+
+	return color;
 }
 
 struct RaycastThreadWorkCommon
 {
     const RaycastGeometry* geometry;
+    uint32 seed;
     Vec3 filmTopLeft;
     Vec3 filmUnitOffsetX;
     Vec3 filmUnitOffsetY;
@@ -513,7 +598,6 @@ struct RaycastThreadWork
 {
     const RaycastThreadWorkCommon* common;
     Vec3* colorHdr;
-    RandomSeries randomSeries;
     uint32 minX, maxX, minY, maxY;
 };
 
@@ -523,12 +607,8 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     UNREFERENCED_PARAMETER(queue);
     ZoneScoped;
 
-    // TODO have some guarantee that this stack will be big enough
-    const RaycastMeshBvh* bvhStack[BVH_STACK_SIZE];
-
     RaycastThreadWork* work = (RaycastThreadWork*)data;
     const RaycastThreadWorkCommon& common = *work->common;
-    RandomSeries randomSeries = work->randomSeries;
     const uint32 minX = work->minX;
     const uint32 maxX = work->maxX;
     const uint32 minY = work->minY;
@@ -536,15 +616,18 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 
     for (uint32 y = minY; y < maxY; y++) {
         for (uint32 x = minX; x < maxX; x++) {
+            const uint32 pixelIndex = y * common.width + x;
+
             const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
             const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
             const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
             const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
+            RandomSeries series = { .state = WangHash(pixelIndex) };
+            series.state += common.seed;
 
             const Vec3 raycastColor = RaycastColor(common.cameraPos, rayDir, common.minDist, common.maxDist,
-                                                   bvhStack, *common.geometry, &randomSeries);
+                                                   *common.geometry, &series);
 
-            const uint32 pixelIndex = y * common.width + x;
             work->colorHdr[pixelIndex] = raycastColor;
         }
     }
@@ -582,6 +665,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
 
         RaycastThreadWorkCommon workCommon = {
             .geometry = &geometry,
+            .seed = (uint32)rand(),
             .filmTopLeft = filmTopLeft,
             .filmUnitOffsetX = filmUnitOffsetX,
             .filmUnitOffsetY = filmUnitOffsetY,
@@ -591,11 +675,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             .minDist = 0.0f,
             .maxDist = 20.0f,
         };
-
-        RandomSeries series;
-        const uint32 seed = (uint32)(cameraPos.x * 1000.0f + cameraPos.y * 1000.0f + cameraPos.z * 1000.0f);
-        series.state = seed;
-        series.state = (uint32)rand();
 
         const uint32 WORK_TILE_SIZE = 16;
         const uint32 wholeTilesX = width / WORK_TILE_SIZE;
@@ -609,7 +688,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
                 RaycastThreadWork* work = &workEntries[workIndex];
                 work->common = &workCommon;
                 work->colorHdr = canvas->colorHdr.data,
-                work->randomSeries.state = RandomUInt32(&series);
                 work->minX = tileX * WORK_TILE_SIZE;
                 work->maxX = (tileX + 1) * WORK_TILE_SIZE;
                 work->minY = tileY * WORK_TILE_SIZE;
@@ -641,7 +719,12 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         }
 
         for (uint32 i = 0; i < numPixels; i++) {
-            const Vec3 colorNormalized = canvas->colorHdr[i] / maxColor;
+            //const Vec3 colorNormalized = canvas->colorHdr[i] / maxColor;
+            const Vec3 colorNormalized = Vec3 {
+                ClampFloat32(canvas->colorHdr[i].r, 0.0f, 1.0f),
+                ClampFloat32(canvas->colorHdr[i].g, 0.0f, 1.0f),
+                ClampFloat32(canvas->colorHdr[i].b, 0.0f, 1.0f)
+            };
             // TODO gamma correction?
             const uint8 r = (uint8)(colorNormalized.r * 255.0f);
             const uint8 g = (uint8)(colorNormalized.g * 255.0f);
@@ -650,7 +733,6 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         }
     }
 }
-#endif
 
 bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool, uint32 width, uint32 height,
                           const RaycastGeometry& geometry, LinearAllocator* allocator, VulkanRaytracePipeline* pipeline)
@@ -691,7 +773,9 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
             const RaycastMesh& srcMesh = geometry.meshes[i];
             ComputeMesh* newMesh = pipeline->meshes.Append();
             newMesh->offset = srcMesh.offset;
-            newMesh->inverseQuat = srcMesh.inverseQuat;
+            newMesh->inverseQuat = Vec4 {
+                srcMesh.inverseQuat.x, srcMesh.inverseQuat.y, srcMesh.inverseQuat.z, srcMesh.inverseQuat.w
+            };
             newMesh->startBvh = srcMesh.startBvh;
             newMesh->endBvh = srcMesh.endBvh;
         }

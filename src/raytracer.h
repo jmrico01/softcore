@@ -31,7 +31,7 @@ struct RaycastBvh
 
 struct RaycastMesh
 {
-    Vec4 inverseQuat;
+    Quat inverseQuat;
     Vec3 offset;
     uint32 startBvh;
     uint32 endBvh;

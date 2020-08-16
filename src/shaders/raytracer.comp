@@ -130,16 +130,6 @@ vec3 RandomInUnitSphereSurface(inout uint state)
 	return vec3(r * cos(angle), r * sin(angle), z);
 }
 
-vec3 RandomInHemisphereUnitX(inout uint state)
-{
-	// TODO not quite right, overcounts the cube corners
-	return normalize(vec3(
-		RandomUnilateral(state),
-		RandomBilateral(state),
-		RandomBilateral(state)
-	));
-}
-
 float pow3(float x)
 {
 	return x * x * x;
@@ -210,7 +200,7 @@ vec4 QuatRotationFromUnitX(vec3 reference)
 	return normalize(q);
 }
 
-vec3 GetNewRayDirDiffuse(vec3 hitPos, vec3 hitNormal, inout uint randomState)
+vec3 GetNewRayDirDiffuse(vec3 hitNormal, inout uint randomState)
 {
 	// return normalize(hitNormal + RandomInsideUnitSphere(randomState));
 	return normalize(hitNormal + RandomInUnitSphereSurface(randomState));
@@ -304,16 +294,16 @@ void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, inout uint hitMaterialIndex, ou
 			if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < hitDist) {
 				const uint tStart = bvh.startTriangle;
 				const uint tEnd = bvh.endTriangle;
-				for (uint i = tStart; i < tEnd; i++) {
-					const vec3 normal = triangles[i].normal;
+				for (uint j = tStart; j < tEnd; j++) {
+					const vec3 normal = triangles[j].normal;
 					const float dotNegRayNormal = dot(meshRayDir, normal);
 					if (dotNegRayNormal <= 0.0) {
 						float t;
 						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, meshRayDir,
-																		 triangles[i].a, triangles[i].b, triangles[i].c,
+																		 triangles[j].a, triangles[j].b, triangles[j].c,
 																		 t);
 						if (triangleHit && t > MIN_DIST && t < hitDist) {
-							hitMaterialIndex = triangles[i].materialIndex;
+							hitMaterialIndex = triangles[j].materialIndex;
 							hitNormal = normal;
 							hitDist = t;
 						}
@@ -356,7 +346,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 	vec3 albedoMultSpecular = hitMaterial.albedo;
 	const float sampleWeightDiffuse = 1.0 / SAMPLES_DIFFUSE * weightDiffuse;
 	const float sampleWeightSpecular = 1.0 / SAMPLES_SPECULAR * weightSpecular;
-	const vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(rayOrigin, hitNormal, randomState);
+	const vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, randomState);
 	const vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial.smoothness, randomState);
 
 	vec3 color = vec3(0.0, 0.0, 0.0);
@@ -383,7 +373,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 				else if (i != BOUNCES_DIFFUSE - 1) {
 					albedoMultDiffuse *= hitMaterial.albedo;
 					sampleRayOrigin += sampleRayDir * hitDist;
-					sampleRayDir = GetNewRayDirDiffuse(rayOrigin, hitNormal, randomState);
+					sampleRayDir = GetNewRayDirDiffuse(hitNormal, randomState);
 				}
 			}
 		}
