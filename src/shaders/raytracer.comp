@@ -193,10 +193,7 @@ vec4 QuatRotationFromUnitX(vec3 reference)
 		return vec4(0.0, 1.0, 0.0, 0.0);
 	}
 
-	vec4 q;
-	const vec3 axis = cross(vec3(1.0, 0.0, 0.0), reference);
-	q.xyz = axis;
-	q.w = 1.0 + dotUnitX;
+	const vec4 q = vec4(cross(vec3(1.0, 0.0, 0.0), reference), 1.0 + dotUnitX);
 	return normalize(q);
 }
 
@@ -296,8 +293,8 @@ void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, inout uint hitMaterialIndex, ou
 				const uint tEnd = bvh.endTriangle;
 				for (uint j = tStart; j < tEnd; j++) {
 					const vec3 normal = triangles[j].normal;
-					const float dotNegRayNormal = dot(meshRayDir, normal);
-					if (dotNegRayNormal <= 0.0) {
+					const float dotRayNormal = dot(meshRayDir, normal);
+					if (dotRayNormal <= 0.0) {
 						float t;
 						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, meshRayDir,
 																		 triangles[j].a, triangles[j].b, triangles[j].c,

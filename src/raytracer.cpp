@@ -104,6 +104,26 @@ Vec3 Reflect(Vec3 dir, Vec3 normal)
     return dir - 2.0f * Dot(dir, normal) * normal;
 }
 
+// Returns a quaternion for the rotation required to align unit X vector with unit vector reference
+Quat QuatRotationFromUnitX(Vec3 reference)
+{
+    const float32 EPSILON = 0.000001f;
+
+	const float dotUnitX = Dot(Vec3::unitX, reference);
+	if (dotUnitX > (1.0 - EPSILON)) {
+		return Quat::one;
+	}
+	else if (dotUnitX < (-1.0 + EPSILON)) {
+		// 180-degree rotation about y axis (perpendicular to x)
+		// comptime angle = PI, cosHalfAngle = 0, sinHalfAngle = 1, axis = 0.0, 1.0, 0.0
+		return Quat { 0.0, 1.0, 0.0, 0.0 };
+	}
+
+	const Vec3 axis = Cross(Vec3::unitX, reference);
+    const Quat q = { .x = axis.x, .y = axis.y, .z = axis.z, .w = 1.0f + dotUnitX };
+	return Normalize(q);
+}
+
 Vec3 GetNewRayDirDiffuse(Vec3 hitNormal, RandomSeries* series)
 {
 	return Normalize(hitNormal + RandomInUnitSphereSurface(series));
@@ -123,7 +143,7 @@ Vec3 GetNewRayDirSpecular(Vec3 rayDir, Vec3 hitNormal, float32 smoothness, Rando
     Quat quat = QuatFromAngleUnitAxis(gamma, Vec3::unitZ);
 	quat = QuatFromAngleUnitAxis(phi, Vec3::unitX) * quat;
     // TODO hardcode unitX here?
-	quat = QuatRotBetweenVectors(pureBounce, Vec3::unitX) * quat;
+	quat = QuatRotationFromUnitX(pureBounce) * quat;
 
 	return quat * Vec3::unitX;
 }
@@ -581,6 +601,179 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
 	return color;
 }
 
+#include "simd.cpp"
+
+void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& geometry, float32 minDist,
+                      __m256i* hitMaterialIndex8, Vec3_8* hitNormal8, __m256* hitDist8)
+{
+    const __m256 minDist8 = _mm256_set1_ps(minDist);
+
+	for (uint32 m = 0; m < geometry.meshes.size; m++) {
+		const RaycastMesh mesh = geometry.meshes[m];
+        const Vec3_8 meshOffset8 = Set1Vec3_8(mesh.offset);
+        const Quat_8 meshInverseQuat8 = Set1Quat_8(mesh.inverseQuat);
+
+		const Vec3_8 meshRayOrigin8 = Multiply_8(meshInverseQuat8, rayOrigin8 + meshOffset8);
+		const Vec3_8 meshRayDir8 = Multiply_8(meshInverseQuat8, rayDir8);
+		const Vec3_8 meshInverseRayDir8 = Reciprocal_8(meshRayDir8);
+
+		uint32 i = mesh.startBvh;
+		while (i < mesh.endBvh) {
+			const RaycastBvh bvh = geometry.bvhs[i];
+
+            __m256 tMin8, tMax8;
+			const __m256 aabbHit8 = RayAABBIntersection_8(meshRayOrigin8, meshInverseRayDir8, bvh.aabb,
+                                                          &tMin8, &tMax8);
+            const __m256 hitPositive8 = _mm256_or_ps(_mm256_cmp_ps(tMin8, ZERO_8, _CMP_GE_OQ),
+                                                     _mm256_cmp_ps(tMax8, ZERO_8, _CMP_GE_OQ));
+            const __m256 hitCloser8 = _mm256_cmp_ps(tMin8, *hitDist8, _CMP_LT_OQ);
+
+            if (AnyNonZero_8(aabbHit8) && AnyNonZero_8(hitPositive8) && AnyNonZero_8(hitCloser8)) {
+                const uint32 tStart = bvh.startTriangle;
+                const uint32 tEnd = bvh.endTriangle;
+                for (uint32 j = tStart; j < tEnd; j++) {
+                    const RaycastTriangle& triangle = geometry.triangles[j];
+                    const Vec3_8 triangleNormal8 = Set1Vec3_8(triangle.normal);
+                    const __m256 dotRayNormal8 = Dot_8(meshRayDir8, triangleNormal8);
+                    const __m256 rayNormalSameDir8 = _mm256_cmp_ps(dotRayNormal8, ZERO_8, _CMP_LE_OQ);
+                    if (AnyNonZero_8(rayNormalSameDir8)) {
+                        __m256 t8;
+                        const __m256 triangleHit8 = RayTriangleIntersection_8(meshRayOrigin8, meshRayDir8,
+                                                                              triangle.pos[0],
+                                                                              triangle.pos[1],
+                                                                              triangle.pos[2],
+                                                                              &t8);
+                        const __m256 triangleCloser8 = _mm256_and_ps(_mm256_cmp_ps(t8, minDist8, _CMP_GT_OQ),
+                                                                     _mm256_cmp_ps(t8, *hitDist8, _CMP_LT_OQ));
+                        const __m256 triangleHitCloser8 = _mm256_and_ps(triangleHit8, triangleCloser8);
+                        const __m256i triangleHitCloser8i = _mm256_castps_si256(triangleHitCloser8);
+
+                        const __m256i materialIndex8 = _mm256_set1_epi32(triangle.materialIndex);
+                        const Vec3_8 normal8 = Set1Vec3_8(triangle.normal);
+                        *hitMaterialIndex8 = _mm256_blendv_epi8(*hitMaterialIndex8, materialIndex8, triangleHitCloser8i);
+                        hitNormal8->x = _mm256_blendv_ps(hitNormal8->x, normal8.x, triangleHitCloser8);
+                        hitNormal8->y = _mm256_blendv_ps(hitNormal8->y, normal8.y, triangleHitCloser8);
+                        hitNormal8->z = _mm256_blendv_ps(hitNormal8->z, normal8.z, triangleHitCloser8);
+                        *hitDist8 = _mm256_blendv_ps(*hitDist8, t8, triangleHitCloser8);
+                    }
+                }
+
+                i++;
+            }
+            else {
+                i += bvh.skip;
+            }
+        }
+    }
+}
+
+Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, float32 minDist, float32 maxDist,
+                      const RaycastGeometry& geometry, RandomSeries* series)
+{
+    UNREFERENCED_PARAMETER(series);
+    ZoneScoped;
+
+    const __m256i MAX_MATERIALS_8 = _mm256_set1_epi32(geometry.materials.size);
+
+    const __m256 weightDiffuse8 = _mm256_set1_ps(0.5f);
+    const __m256 weightSpecular8 = ONE_8 - weightDiffuse8;
+    const __m256 smoothnessDiffuse = _mm256_set1_ps(0.2f);
+
+    __m256i hitMaterialIndex8 = MAX_MATERIALS_8;
+    Vec3_8 hitNormal8;
+    __m256 hitDist8 = _mm256_set1_ps(maxDist);
+    TraverseMeshes_8(rayOrigin8, rayDir8, geometry, minDist, &hitMaterialIndex8, &hitNormal8, &hitDist8);
+
+    const __m256i notHit8 = _mm256_cmpeq_epi32(hitMaterialIndex8, MAX_MATERIALS_8);
+    Vec3_8 color = Set1Vec3_8(Vec3::zero);
+    color.x = _mm256_blendv_ps(ONE_8, ZERO_8, _mm256_castsi256_ps(notHit8));
+
+    return color;
+
+#if 0
+    const RaycastMaterial* hitMaterial;
+    if (hitMaterialIndex == MAX_MATERIALS) {
+        return Vec3::zero;
+    }
+    else {
+        hitMaterial = &geometry.materials[hitMaterialIndex];
+        if (hitMaterial->emission > 0.0) {
+            return hitMaterial->emission * hitMaterial->emissionColor;
+        }
+    }
+
+    rayOrigin += rayDir * hitDist;
+    Vec3 albedoMultDiffuse = hitMaterial->albedo;
+    Vec3 albedoMultSpecular = hitMaterial->albedo;
+    const float32 sampleWeightDiffuse = 1.0 / SAMPLES_DIFFUSE * weightDiffuse;
+    const float32 sampleWeightSpecular = 1.0 / SAMPLES_SPECULAR * weightSpecular;
+    const Vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, series);
+    const Vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial->smoothness, series);
+
+    Vec3 color = Vec3::zero;
+
+    // Diffuse
+    for (uint32 s = 0; s < SAMPLES_DIFFUSE; s++) {
+        Vec3 sampleRayOrigin = rayOrigin;
+        Vec3 sampleRayDir = sampleRayDirDiffuse;
+
+        for (uint32 i = 0; i < BOUNCES_DIFFUSE; i++) {
+            hitMaterialIndex = MAX_MATERIALS;
+            hitDist = maxDist;
+            TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+
+            if (hitMaterialIndex == MAX_MATERIALS) {
+                break;
+            }
+            else {
+                const RaycastMaterial& hitMaterialD = geometry.materials[hitMaterialIndex];
+                if (hitMaterialD.emission > 0.0) {
+                    color += hitMaterialD.emission * sampleWeightDiffuse
+                        * Multiply(hitMaterialD.emissionColor, albedoMultDiffuse);
+                    break;
+                }
+                else if (i != BOUNCES_DIFFUSE - 1) {
+                    albedoMultDiffuse = Multiply(albedoMultDiffuse, hitMaterialD.albedo);
+                    sampleRayOrigin += sampleRayDir * hitDist;
+                    sampleRayDir = GetNewRayDirDiffuse(hitNormal, series);
+                }
+            }
+        }
+    }
+
+    // Specular
+    for (uint32 s = 0; s < SAMPLES_SPECULAR; s++) {
+        Vec3 sampleRayOrigin = rayOrigin;
+        Vec3 sampleRayDir = sampleRayDirSpecular;
+
+        for (uint32 i = 0; i < BOUNCES_SPECULAR; i++) {
+            hitMaterialIndex = MAX_MATERIALS;
+            hitDist = maxDist;
+            TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+
+            if (hitMaterialIndex == MAX_MATERIALS) {
+                break;
+            }
+            else {
+                const RaycastMaterial& hitMaterialS = geometry.materials[hitMaterialIndex];
+                if (hitMaterialS.emission > 0.0) {
+                    color += hitMaterialS.emission * sampleWeightSpecular
+                        * Multiply(hitMaterialS.emissionColor, albedoMultSpecular);
+                    break;
+                }
+                else if (i != BOUNCES_SPECULAR - 1) {
+                    albedoMultSpecular = Multiply(albedoMultSpecular, hitMaterialS.albedo);
+                    sampleRayOrigin += sampleRayDir * hitDist;
+                    sampleRayDir = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterialS.smoothness, series);
+                }
+            }
+        }
+    }
+
+    return color;
+#endif
+}
+
 struct RaycastThreadWorkCommon
 {
     const RaycastGeometry* geometry;
@@ -614,12 +807,41 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     const uint32 minY = work->minY;
     const uint32 maxY = work->maxY;
 
+    const __m256 minX8 = _mm256_set1_ps((float32)minX);
+    const Vec3_8 filmUnitOffsetX8 = Set1Vec3_8(common.filmUnitOffsetX);
+    const Vec3_8 filmUnitOffsetY8 = Set1Vec3_8(common.filmUnitOffsetY);
+    const Vec3_8 filmTopLeft8 = Set1Vec3_8(common.filmTopLeft);
+    const Vec3_8 cameraPos8 = Set1Vec3_8(common.cameraPos);
+
     for (uint32 y = minY; y < maxY; y++) {
+#if 1
+        const __m256 y8 = _mm256_set1_ps((float32)y);
+        const Vec3_8 filmOffsetY8 = filmUnitOffsetY8 * y8;
+
+        uint32 n = (maxX - minX) / 8;
+        for (uint32 i = 0; i < n; i++) {
+            const __m256 baseX8 = _mm256_set1_ps((float32)i * 8.0f);
+            const __m256 x8 = _mm256_set_ps(7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f) + minX8 + baseX8;
+
+            const Vec3_8 filmOffsetX8 = filmUnitOffsetX8 * x8;
+            const Vec3_8 filmPos8 = filmTopLeft8 + filmOffsetX8 + filmOffsetY8;
+            const Vec3_8 rayDir8 = Normalize_8(filmPos8 - cameraPos8);
+            RandomSeries series = { .state = 0 }; // TODO init
+            series.state += common.seed;
+
+            const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, common.minDist, common.maxDist,
+                                                        *common.geometry, &series);
+            const uint32 basePixelIndex = y * common.width + minX + i * 8;
+            StoreVec3_8(raycastColor8, work->colorHdr + basePixelIndex);
+        }
+
+#else
+        const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
+
         for (uint32 x = minX; x < maxX; x++) {
             const uint32 pixelIndex = y * common.width + x;
 
             const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
-            const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
             const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
             const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
             RandomSeries series = { .state = WangHash(pixelIndex) };
@@ -630,6 +852,7 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 
             work->colorHdr[pixelIndex] = raycastColor;
         }
+#endif
     }
 }
 
@@ -677,6 +900,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         };
 
         const uint32 WORK_TILE_SIZE = 16;
+        static_assert(WORK_TILE_SIZE % 8 == 0); // AVX width
         const uint32 wholeTilesX = width / WORK_TILE_SIZE;
         const uint32 wholeTilesY = height / WORK_TILE_SIZE;
         const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
