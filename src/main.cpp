@@ -439,115 +439,121 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
     }
 
-#if 1
-    // CPU raytracing
+    // Raytraced render
     {
-        ZoneScopedN("RaytracedRendering");
+        ZoneScopedN("RaytraceRender");
 
-        LinearAllocator allocator(transientState->scratch);
-
-        const uint32 numBytes = screenSize.x * screenSize.y * 4;
-        void* imageMemory;
-        vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
-        uint32* pixels = (uint32*)imageMemory;
-
-        RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
-                       screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
-
-        vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
-    }
-#else
-    UNREFERENCED_PARAMETER(queue);
-#endif
-
-    // GPU raytracing
-    {
-        LinearAllocator allocator(transientState->scratch);
-
-        const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
-        const RaycastGeometry& geometry = appState->raycastGeometry;
-
-        ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
-        computeUbo->seed = rand();
-
+#if 0
+        // GPU
         {
-            const uint32 width = WINDOW_START_WIDTH;//screenSize.x;
-            const uint32 height = WINDOW_START_HEIGHT;//screenSize.y;
-            const Vec3 cameraPos = appState->cameraPos;
+            ZoneScopedN("RaytraceGPU");
 
-            // TODO copy-pasted from raytracer.cpp for now
-            const Quat inverseCameraRot = Inverse(cameraRot);
-            const Vec3 cameraUp2 = inverseCameraRot * Vec3::unitZ;
-            const Vec3 cameraForward2 = inverseCameraRot * Vec3::unitX;
-            const Vec3 cameraLeft2 = inverseCameraRot * Vec3::unitY;
+            LinearAllocator allocator(transientState->scratch);
 
-            const float32 filmDist = 1.0f;
-            const float32 filmHeight = tanf(fovRadians / 2.0f) * 2.0f;
-            const float32 filmWidth = filmHeight * (float32)width / (float32)height;
+            const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
+            const RaycastGeometry& geometry = appState->raycastGeometry;
 
-            computeUbo->cameraPos = cameraPos;
-            computeUbo->filmTopLeft = cameraPos + cameraForward2 * filmDist
-                + (filmWidth / 2.0f + -0.136f) * cameraUp2 + (filmHeight / 2.0f + 0.136f) * cameraLeft2;
-            computeUbo->filmUnitOffsetX = -cameraLeft2 * filmWidth / (float32)(width - 1);
-            computeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
-        }
+            ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
+            computeUbo->seed = rand();
 
-        uint32 numMaterials = 0;
-        for (uint32 i = 0; i < geometry.materials.size; i++) {
-            const RaycastMaterial& srcMaterial = geometry.materials[i];
-            ComputeMaterial* dstMaterial = &computeUbo->materials[numMaterials++];
+            {
+                const uint32 width = WINDOW_START_WIDTH;//screenSize.x;
+                const uint32 height = WINDOW_START_HEIGHT;//screenSize.y;
+                const Vec3 cameraPos = appState->cameraPos;
 
-            dstMaterial->albedo = srcMaterial.albedo;
-            dstMaterial->smoothness = srcMaterial.smoothness;
-            dstMaterial->emissionColor = srcMaterial.emissionColor;
-            dstMaterial->emission = srcMaterial.emission;
+                // TODO copy-pasted from raytracer.cpp for now
+                const Quat inverseCameraRot = Inverse(cameraRot);
+                const Vec3 cameraUp2 = inverseCameraRot * Vec3::unitZ;
+                const Vec3 cameraForward2 = inverseCameraRot * Vec3::unitX;
+                const Vec3 cameraLeft2 = inverseCameraRot * Vec3::unitY;
 
-            if (numMaterials >= ComputeUbo::MAX_MATERIALS) {
-                LOG_ERROR("Too many materials, hit limit of %lu\n", ComputeUbo::MAX_MATERIALS);
-                break;
+                const float32 filmDist = 1.0f;
+                const float32 filmHeight = tanf(fovRadians / 2.0f) * 2.0f;
+                const float32 filmWidth = filmHeight * (float32)width / (float32)height;
+
+                computeUbo->cameraPos = cameraPos;
+                computeUbo->filmTopLeft = cameraPos + cameraForward2 * filmDist
+                    + (filmWidth / 2.0f + -0.136f) * cameraUp2 + (filmHeight / 2.0f + 0.136f) * cameraLeft2;
+                computeUbo->filmUnitOffsetX = -cameraLeft2 * filmWidth / (float32)(width - 1);
+                computeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
+            }
+
+            uint32 numMaterials = 0;
+            for (uint32 i = 0; i < geometry.materials.size; i++) {
+                const RaycastMaterial& srcMaterial = geometry.materials[i];
+                ComputeMaterial* dstMaterial = &computeUbo->materials[numMaterials++];
+
+                dstMaterial->albedo = srcMaterial.albedo;
+                dstMaterial->smoothness = srcMaterial.smoothness;
+                dstMaterial->emissionColor = srcMaterial.emissionColor;
+                dstMaterial->emission = srcMaterial.emission;
+
+                if (numMaterials >= ComputeUbo::MAX_MATERIALS) {
+                    LOG_ERROR("Too many materials, hit limit of %lu\n", ComputeUbo::MAX_MATERIALS);
+                    break;
+                }
+            }
+
+            const uint32 numMeshes = raytracePipeline.meshes.size;
+            computeUbo->numMeshes = numMeshes;
+            MemCopy(computeUbo->meshes, raytracePipeline.meshes.data, numMeshes * sizeof(ComputeMesh));
+
+            const Vec3 tetrahedronPos = Vec3 {
+                Sin32(appState->elapsedTime),
+                0.1f * Sin32(appState->elapsedTime / 23.0f),
+                0.0f
+            };
+            const Quat tetrahedronRotInv = Inverse(QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ));
+            computeUbo->meshes[6].offset = -tetrahedronPos;
+            computeUbo->meshes[6].inverseQuat = Vec4 {
+                tetrahedronRotInv.x, tetrahedronRotInv.y, tetrahedronRotInv.z, tetrahedronRotInv.w
+            };
+
+            void* data;
+            vkMapMemory(vulkanState.window.device, raytracePipeline.uniform.memory, 0, sizeof(ComputeUbo), 0, &data);
+            MemCopy(data, computeUbo, sizeof(ComputeUbo));
+            vkUnmapMemory(vulkanState.window.device, raytracePipeline.uniform.memory);
+
+            VkSubmitInfo submitInfo = {};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.waitSemaphoreCount = 0;
+            submitInfo.pWaitSemaphores = nullptr;
+            submitInfo.pWaitDstStageMask = nullptr;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &raytracePipeline.commandBuffer;
+            submitInfo.signalSemaphoreCount = 0;
+            submitInfo.pSignalSemaphores = nullptr;
+
+            if (vkQueueSubmit(raytracePipeline.queue, 1, &submitInfo, raytracePipeline.fence) != VK_SUCCESS) {
+                LOG_ERROR("vkQueueSubmit failed\n");
+            }
+
+            if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                LOG_ERROR("vkWaitForFences failed\n");
+            }
+            if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.fence) != VK_SUCCESS) {
+                LOG_ERROR("vkResetFences failed\n");
             }
         }
+#else
 
-        const uint32 numMeshes = raytracePipeline.meshes.size;
-        computeUbo->numMeshes = numMeshes;
-        MemCopy(computeUbo->meshes, raytracePipeline.meshes.data, numMeshes * sizeof(ComputeMesh));
+        // CPU
+        {
+            ZoneScopedN("RaytraceCPU");
 
-        const Vec3 tetrahedronPos = Vec3 {
-            Sin32(appState->elapsedTime),
-            0.1f * Sin32(appState->elapsedTime / 23.0f),
-            0.0f
-        };
-        const Quat tetrahedronRotInv = Inverse(QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ));
-        computeUbo->meshes[6].offset = -tetrahedronPos;
-        computeUbo->meshes[6].inverseQuat = Vec4 {
-            tetrahedronRotInv.x, tetrahedronRotInv.y, tetrahedronRotInv.z, tetrahedronRotInv.w
-        };
+            LinearAllocator allocator(transientState->scratch);
 
-        void* data;
-        vkMapMemory(vulkanState.window.device, raytracePipeline.uniform.memory, 0, sizeof(ComputeUbo), 0, &data);
-        MemCopy(data, computeUbo, sizeof(ComputeUbo));
-        vkUnmapMemory(vulkanState.window.device, raytracePipeline.uniform.memory);
+            const uint32 numBytes = screenSize.x * screenSize.y * 4;
+            void* imageMemory;
+            vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
+            uint32* pixels = (uint32*)imageMemory;
 
-        VkSubmitInfo submitInfo = {};
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submitInfo.waitSemaphoreCount = 0;
-        submitInfo.pWaitSemaphores = nullptr;
-        submitInfo.pWaitDstStageMask = nullptr;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &raytracePipeline.commandBuffer;
-        submitInfo.signalSemaphoreCount = 0;
-        submitInfo.pSignalSemaphores = nullptr;
+            RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
+                           screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
-        if (vkQueueSubmit(raytracePipeline.queue, 1, &submitInfo, raytracePipeline.fence) != VK_SUCCESS) {
-            LOG_ERROR("vkQueueSubmit failed\n");
+            vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
         }
-
-        if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-            LOG_ERROR("vkWaitForFences failed\n");
-        }
-        if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.fence) != VK_SUCCESS) {
-            LOG_ERROR("vkResetFences failed\n");
-        }
+#endif
     }
 
     // Vulkan rendering

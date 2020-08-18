@@ -33,11 +33,6 @@ struct ComputeTriangle
 };
 static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
 
-struct RandomSeries
-{
-    uint32 state;
-};
-
 // Reference http://www.burtleburtle.net/bob/hash/integer.html
 uint32 WangHash(uint32 seed)
 {
@@ -48,6 +43,11 @@ uint32 WangHash(uint32 seed)
     seed = seed ^ (seed >> 15);
     return seed;
 }
+
+struct RandomSeries
+{
+    uint32 state;
+};
 
 // Reference https://en.wikipedia.org/wiki/Xorshift
 uint32 XOrShift32(RandomSeries* series)
@@ -533,8 +533,8 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
 	rayOrigin += rayDir * hitDist;
 	Vec3 albedoMultDiffuse = hitMaterial->albedo;
 	Vec3 albedoMultSpecular = hitMaterial->albedo;
-	const float32 sampleWeightDiffuse = 1.0 / SAMPLES_DIFFUSE * weightDiffuse;
-	const float32 sampleWeightSpecular = 1.0 / SAMPLES_SPECULAR * weightSpecular;
+	const float32 sampleWeightDiffuse = 1.0f / SAMPLES_DIFFUSE * weightDiffuse;
+	const float32 sampleWeightSpecular = 1.0f / SAMPLES_SPECULAR * weightSpecular;
 	const Vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, series);
 	const Vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial->smoothness, series);
 
@@ -603,11 +603,117 @@ Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist,
 
 #include "simd.cpp"
 
-void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& geometry, float32 minDist,
+// Reference http://www.burtleburtle.net/bob/hash/integer.html
+__m256i WangHash_8(__m256i seed8)
+{
+    const __m256i c61i = _mm256_set1_epi32(61);
+    const __m256i c9i = _mm256_set1_epi32(9);
+    const __m256i cBigBoyi = _mm256_set1_epi32(0x27d4eb2d);
+
+    seed8 = _mm256_xor_si256(_mm256_xor_si256(seed8, c61i), _mm256_srli_epi32(seed8, 16));
+    seed8 = seed8 * c9i;
+    seed8 = _mm256_xor_si256(seed8, _mm256_srli_epi32(seed8, 4));
+    seed8 = seed8 * cBigBoyi;
+    seed8 = _mm256_xor_si256(seed8, _mm256_srli_epi32(seed8, 15));
+    return seed8;
+}
+
+struct RandomSeries_8
+{
+    __m256i state;
+};
+
+// Reference https://en.wikipedia.org/wiki/Xorshift
+__m256i XOrShift32_8(RandomSeries_8* series8)
+{
+    __m256i x = series8->state;
+    x = _mm256_xor_si256(x, _mm256_slli_epi32(x, 13));
+    x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 17));
+    x = _mm256_xor_si256(x, _mm256_slli_epi32(x, 5));
+    series8->state = x;
+	return x;
+}
+
+__m256 RandomUnilateral_8(RandomSeries_8* series8)
+{
+    const __m256 int32MinValue8 = _mm256_set1_ps((float32)INT32_MIN_VALUE);
+    const __m256 uint32MaxValue8 = _mm256_set1_ps((float32)UINT32_MAX_VALUE);
+    return  (_mm256_cvtepi32_ps(XOrShift32_8(series8)) - int32MinValue8) / uint32MaxValue8;
+}
+
+__m256 RandomBilateral_8(RandomSeries_8* series8)
+{
+    return _mm256_set1_ps(2.0f) * RandomUnilateral_8(series8) - ONE_8;
+}
+
+Vec3_8 RandomInUnitSphereSurface_8(RandomSeries_8* series8)
+{
+	const __m256 angle8 = _mm256_set1_ps(2.0f * PI_F) * RandomUnilateral_8(series8);
+	const __m256 z8 = RandomBilateral_8(series8);
+	const __m256 r8 = _mm256_sqrt_ps(ONE_8 - z8 * z8);
+	return Vec3_8 { r8 * _mm256_cos_ps(angle8), r8 * _mm256_sin_ps(angle8), z8 };
+}
+
+__m256 pow3_8(__m256 x)
+{
+	return x * x * x;
+}
+
+__m256 pow4_8(__m256 x)
+{
+	return x * x * x * x;
+}
+
+Vec3_8 Reflect_8(Vec3_8 dir, Vec3_8 normal)
+{
+    return dir - _mm256_set1_ps(2.0f) * Dot_8(dir, normal) * normal;
+}
+
+// Returns a quaternion for the rotation required to align unit X vector with unit vector reference
+Quat_8 QuatRotationFromUnitX_8(Vec3_8 reference8)
+{
+    const __m256 EPSILON_8 = _mm256_set1_ps(0.000001f);
+
+    const __m256 dotUnitX8 = Dot_8(Vec3_8::unitX, reference8);
+	const Vec3_8 axis8 = Cross_8(Vec3_8::unitX, reference8);
+    Quat_8 q8 = Quat_8 { .x = axis8.x, .y = axis8.y, .z = axis8.z, .w = ONE_8 + dotUnitX8 };
+    q8 = Normalize_8(q8);
+
+    const __m256 sameDir8 = _mm256_cmp_ps(dotUnitX8, ONE_8 - EPSILON_8, _CMP_GT_OQ);
+    q8 = Blend_8(q8, Quat_8::one, sameDir8);
+
+    const __m256 oppositeDir8 = _mm256_cmp_ps(dotUnitX8, -ONE_8 + EPSILON_8, _CMP_LT_OQ);
+    q8 = Blend_8(q8, Quat_8 { ZERO_8, ONE_8, ZERO_8, ZERO_8 }, oppositeDir8);
+
+	return q8;
+}
+
+Vec3_8 GetNewRayDirDiffuse_8(Vec3_8 hitNormal8, RandomSeries_8* series8)
+{
+    return Normalize_8(hitNormal8 + RandomInUnitSphereSurface_8(series8));
+}
+
+Vec3_8 GetNewRayDirSpecular_8(Vec3_8 rayDir8, Vec3_8 hitNormal8, __m256 smoothness8, RandomSeries_8* series8)
+{
+	// Gamma is a random variable between 0 and pi/2, that is picked from a distribution which is
+	// lerp between uniform and gaussian w/ fancy params, based on parameter smoothness
+	const __m256 oneMinusS8 = ONE_8 - smoothness8;
+	const __m256 c8 = ONE_8 / (pow3_8(oneMinusS8)) - ONE_8;
+	const __m256 x8 = RandomUnilateral_8(series8);
+	const __m256 gamma8 = _mm256_set1_ps(PI_F / 2.0f) * Lerp_8(ONE_8 - x8, _mm256_exp_ps(-c8 * x8 * x8), smoothness8);
+	const __m256 phi8 = _mm256_set1_ps(2.0f * PI_F) * RandomUnilateral_8(series8);
+	const Vec3_8 pureBounce8 = Reflect_8(rayDir8, hitNormal8);
+
+    Quat_8 quat8 = QuatFromAngleUnitAxis_8(gamma8, Vec3_8::unitZ);
+	quat8 = Multiply_8(QuatFromAngleUnitAxis_8(phi8, Vec3_8::unitX), quat8);
+	quat8 = Multiply_8(QuatRotationFromUnitX_8(pureBounce8), quat8);
+
+	return Multiply_8(quat8, Vec3_8::unitX);
+}
+
+void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& geometry, __m256 minDist8,
                       __m256i* hitMaterialIndex8, Vec3_8* hitNormal8, __m256* hitDist8)
 {
-    const __m256 minDist8 = _mm256_set1_ps(minDist);
-
 	for (uint32 m = 0; m < geometry.meshes.size; m++) {
 		const RaycastMesh mesh = geometry.meshes[m];
         const Vec3_8 meshOffset8 = Set1Vec3_8(mesh.offset);
@@ -667,111 +773,165 @@ void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& 
     }
 }
 
-Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, float32 minDist, float32 maxDist,
-                      const RaycastGeometry& geometry, RandomSeries* series)
+void LoadMaterialProperties_8(const __m256i index8, const Array<RaycastMaterial>& materials,
+                              Vec3_8* albedo8, __m256* smoothness8, Vec3_8* emissionColor8, __m256* emission8)
 {
-    UNREFERENCED_PARAMETER(series);
+    int32 indices[8] = {
+        _mm256_extract_epi32(index8, 0),
+        _mm256_extract_epi32(index8, 1),
+        _mm256_extract_epi32(index8, 2),
+        _mm256_extract_epi32(index8, 3),
+        _mm256_extract_epi32(index8, 4),
+        _mm256_extract_epi32(index8, 5),
+        _mm256_extract_epi32(index8, 6),
+        _mm256_extract_epi32(index8, 7),
+    };
+
+    alignas(32) float32 albedosR[8];
+    alignas(32) float32 albedosG[8];
+    alignas(32) float32 albedosB[8];
+    alignas(32) float32 smoothnesses8[8];
+    alignas(32) float32 emissionColorsR[8];
+    alignas(32) float32 emissionColorsG[8];
+    alignas(32) float32 emissionColorsB[8];
+    alignas(32) float32 emissions[8];
+
+    for (uint32 k = 0; k < 8; k++) {
+        const RaycastMaterial& material = materials[indices[k]];
+        albedosR[k] = material.albedo.r;
+        albedosG[k] = material.albedo.g;
+        albedosB[k] = material.albedo.b;
+        smoothnesses8[k] = material.smoothness;
+        emissionColorsR[k] = material.emissionColor.r;
+        emissionColorsG[k] = material.emissionColor.g;
+        emissionColorsB[k] = material.emissionColor.b;
+        emissions[k] = material.emission;
+    }
+
+    albedo8->x = _mm256_load_ps(albedosR);
+    albedo8->y = _mm256_load_ps(albedosG);
+    albedo8->z = _mm256_load_ps(albedosB);
+    *smoothness8 = _mm256_load_ps(smoothnesses8);
+    emissionColor8->x = _mm256_load_ps(emissionColorsR);
+    emissionColor8->y = _mm256_load_ps(emissionColorsG);
+    emissionColor8->z = _mm256_load_ps(emissionColorsB);
+    *emission8 = _mm256_load_ps(emissions);
+}
+
+Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256 maxDist8,
+                      const RaycastGeometry& geometry, RandomSeries_8* series8)
+{
     ZoneScoped;
 
-    const __m256i MAX_MATERIALS_8 = _mm256_set1_epi32(geometry.materials.size);
+    const __m256 ru8 = RandomUnilateral_8(series8);
+    const __m256 rb8 = RandomBilateral_8(series8);
+    const __m256 samplesDiffuse8 = _mm256_set1_ps((float32)SAMPLES_DIFFUSE);
+    const __m256 samplesSpecular8 = _mm256_set1_ps((float32)SAMPLES_SPECULAR);
+    const __m256i maxMaterials8 = _mm256_set1_epi32(geometry.materials.size);
 
     const __m256 weightDiffuse8 = _mm256_set1_ps(0.5f);
     const __m256 weightSpecular8 = ONE_8 - weightDiffuse8;
     const __m256 smoothnessDiffuse = _mm256_set1_ps(0.2f);
 
-    __m256i hitMaterialIndex8 = MAX_MATERIALS_8;
+    __m256i hitMaterialIndex8 = maxMaterials8;
     Vec3_8 hitNormal8;
-    __m256 hitDist8 = _mm256_set1_ps(maxDist);
-    TraverseMeshes_8(rayOrigin8, rayDir8, geometry, minDist, &hitMaterialIndex8, &hitNormal8, &hitDist8);
+    __m256 hitDist8 = maxDist8;
+    TraverseMeshes_8(rayOrigin8, rayDir8, geometry, minDist8, &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-    const __m256i notHit8 = _mm256_cmpeq_epi32(hitMaterialIndex8, MAX_MATERIALS_8);
-    Vec3_8 color = Set1Vec3_8(Vec3::zero);
-    color.x = _mm256_blendv_ps(ONE_8, ZERO_8, _mm256_castsi256_ps(notHit8));
-
-    return color;
-
-#if 0
-    const RaycastMaterial* hitMaterial;
-    if (hitMaterialIndex == MAX_MATERIALS) {
-        return Vec3::zero;
-    }
-    else {
-        hitMaterial = &geometry.materials[hitMaterialIndex];
-        if (hitMaterial->emission > 0.0) {
-            return hitMaterial->emission * hitMaterial->emissionColor;
-        }
+    const __m256i notHit8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+    if (AllOne_8(notHit8i)) {
+        return Vec3_8::zero;
     }
 
-    rayOrigin += rayDir * hitDist;
-    Vec3 albedoMultDiffuse = hitMaterial->albedo;
-    Vec3 albedoMultSpecular = hitMaterial->albedo;
-    const float32 sampleWeightDiffuse = 1.0 / SAMPLES_DIFFUSE * weightDiffuse;
-    const float32 sampleWeightSpecular = 1.0 / SAMPLES_SPECULAR * weightSpecular;
-    const Vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, series);
-    const Vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial->smoothness, series);
+    const __m256 notHit8 = _mm256_castsi256_ps(notHit8i);
+    rayOrigin8 = rayOrigin8 + rayDir8 * hitDist8;
 
-    Vec3 color = Vec3::zero;
+    Vec3_8 hitMaterialAlbedo8;
+    __m256 hitMaterialSmoothness8;
+    Vec3_8 hitMaterialEmissionColor8;
+    __m256 hitMaterialEmission8;
+    LoadMaterialProperties_8(hitMaterialIndex8, geometry.materials,
+                             &hitMaterialAlbedo8, &hitMaterialSmoothness8,
+                             &hitMaterialEmissionColor8, &hitMaterialEmission8);
+
+    const __m256 notLight8 = _mm256_or_ps(notHit8, _mm256_cmp_ps(hitMaterialEmission8, ZERO_8, _CMP_LE_OQ));
+    const Vec3_8 lightColor8 = hitMaterialEmission8 * hitMaterialEmissionColor8;
+    if (AllZero_8(notLight8)) {
+        return lightColor8;
+    }
+
+    const Vec3_8 albedoMultDiffuse8 = hitMaterialAlbedo8;
+    const Vec3_8 albedoMultSpecular8 = hitMaterialAlbedo8;
+	const __m256 sampleWeightDiffuse8 = ONE_8 / samplesDiffuse8 * weightDiffuse8;
+	const __m256 sampleWeightSpecular8 = ONE_8 / samplesSpecular8 * weightSpecular8;
+	const Vec3_8 sampleRayDirDiffuse8 = GetNewRayDirDiffuse_8(hitNormal8, series8);
+	const Vec3_8 sampleRayDirSpecular8 = GetNewRayDirSpecular_8(rayDir8, hitNormal8, hitMaterialSmoothness8, series8);
+
+    Vec3_8 color8 = Vec3_8::zero;
 
     // Diffuse
     for (uint32 s = 0; s < SAMPLES_DIFFUSE; s++) {
-        Vec3 sampleRayOrigin = rayOrigin;
-        Vec3 sampleRayDir = sampleRayDirDiffuse;
+        Vec3_8 sampleRayOrigin8 = rayOrigin8;
+        Vec3_8 sampleRayDir8 = sampleRayDirDiffuse8;
 
         for (uint32 i = 0; i < BOUNCES_DIFFUSE; i++) {
-            hitMaterialIndex = MAX_MATERIALS;
-            hitDist = maxDist;
-            TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+            hitMaterialIndex8 = maxMaterials8;
+            hitDist8 = maxDist8;
+            TraverseMeshes_8(sampleRayOrigin8, sampleRayDir8, geometry, minDist8,
+                             &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-            if (hitMaterialIndex == MAX_MATERIALS) {
+            const __m256i notHitDiffuse8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+            if (AllOne_8(notHitDiffuse8i)) {
                 break;
             }
-            else {
-                const RaycastMaterial& hitMaterialD = geometry.materials[hitMaterialIndex];
-                if (hitMaterialD.emission > 0.0) {
-                    color += hitMaterialD.emission * sampleWeightDiffuse
-                        * Multiply(hitMaterialD.emissionColor, albedoMultDiffuse);
-                    break;
-                }
-                else if (i != BOUNCES_DIFFUSE - 1) {
-                    albedoMultDiffuse = Multiply(albedoMultDiffuse, hitMaterialD.albedo);
-                    sampleRayOrigin += sampleRayDir * hitDist;
-                    sampleRayDir = GetNewRayDirDiffuse(hitNormal, series);
-                }
-            }
+
+            hitMaterialIndex8 = _mm256_blendv_epi8(hitMaterialIndex8, ZERO_8i, notHitDiffuse8i);
+            LoadMaterialProperties_8(hitMaterialIndex8, geometry.materials,
+                                     &hitMaterialAlbedo8, &hitMaterialSmoothness8,
+                                     &hitMaterialEmissionColor8, &hitMaterialEmission8);
+            const __m256 notHitDiffuse8 = _mm256_castsi256_ps(notHitDiffuse8i);
+            const __m256 notLightDiffuse8 = _mm256_or_ps(notHitDiffuse8,
+                                                         _mm256_cmp_ps(hitMaterialEmission8, ZERO_8, _CMP_LE_OQ));
+
+            const Vec3_8 lightColorDiffuse8 = hitMaterialEmission8 * sampleWeightDiffuse8
+                * Multiply_8(hitMaterialEmissionColor8, albedoMultDiffuse8);
+            const Vec3_8 colorDiffuse8 = Blend_8(lightColorDiffuse8, Vec3_8::zero, notLightDiffuse8);
+            color8 = color8 + colorDiffuse8;
         }
     }
 
     // Specular
     for (uint32 s = 0; s < SAMPLES_SPECULAR; s++) {
-        Vec3 sampleRayOrigin = rayOrigin;
-        Vec3 sampleRayDir = sampleRayDirSpecular;
+        Vec3_8 sampleRayOrigin8 = rayOrigin8;
+        Vec3_8 sampleRayDir8 = sampleRayDirSpecular8;
 
         for (uint32 i = 0; i < BOUNCES_SPECULAR; i++) {
-            hitMaterialIndex = MAX_MATERIALS;
-            hitDist = maxDist;
-            TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
+            hitMaterialIndex8 = maxMaterials8;
+            hitDist8 = maxDist8;
+            TraverseMeshes_8(sampleRayOrigin8, sampleRayDir8, geometry, minDist8,
+                             &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-            if (hitMaterialIndex == MAX_MATERIALS) {
+            const __m256i notHitSpecular8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+            if (AllOne_8(notHitSpecular8i)) {
                 break;
             }
-            else {
-                const RaycastMaterial& hitMaterialS = geometry.materials[hitMaterialIndex];
-                if (hitMaterialS.emission > 0.0) {
-                    color += hitMaterialS.emission * sampleWeightSpecular
-                        * Multiply(hitMaterialS.emissionColor, albedoMultSpecular);
-                    break;
-                }
-                else if (i != BOUNCES_SPECULAR - 1) {
-                    albedoMultSpecular = Multiply(albedoMultSpecular, hitMaterialS.albedo);
-                    sampleRayOrigin += sampleRayDir * hitDist;
-                    sampleRayDir = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterialS.smoothness, series);
-                }
-            }
+
+            hitMaterialIndex8 = _mm256_blendv_epi8(hitMaterialIndex8, ZERO_8i, notHitSpecular8i);
+            LoadMaterialProperties_8(hitMaterialIndex8, geometry.materials,
+                                     &hitMaterialAlbedo8, &hitMaterialSmoothness8,
+                                     &hitMaterialEmissionColor8, &hitMaterialEmission8);
+            const __m256 notHitSpecular8 = _mm256_castsi256_ps(notHitSpecular8i);
+            const __m256 notLightSpecular8 = _mm256_or_ps(notHitSpecular8,
+                                                          _mm256_cmp_ps(hitMaterialEmission8, ZERO_8, _CMP_LE_OQ));
+
+            const Vec3_8 lightColorSpecular8 = hitMaterialEmission8 * sampleWeightSpecular8
+                * Multiply_8(hitMaterialEmissionColor8, albedoMultSpecular8);
+            const Vec3_8 colorSpecular8 = Blend_8(lightColorSpecular8, Vec3_8::zero, notLightSpecular8);
+            color8 = color8 + colorSpecular8;
         }
     }
 
-    return color;
-#endif
+    return Blend_8(lightColor8, color8, notLight8);
 }
 
 struct RaycastThreadWorkCommon
@@ -806,7 +966,10 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     const uint32 maxX = work->maxX;
     const uint32 minY = work->minY;
     const uint32 maxY = work->maxY;
+    const uint32 batchesX = (maxX - minX) / 8;
 
+    const __m256 minDist8 = _mm256_set1_ps(common.minDist);
+    const __m256 maxDist8 = _mm256_set1_ps(common.maxDist);
     const __m256 minX8 = _mm256_set1_ps((float32)minX);
     const Vec3_8 filmUnitOffsetX8 = Set1Vec3_8(common.filmUnitOffsetX);
     const Vec3_8 filmUnitOffsetY8 = Set1Vec3_8(common.filmUnitOffsetY);
@@ -815,23 +978,29 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 
     for (uint32 y = minY; y < maxY; y++) {
 #if 1
+        const __m256i basePixelIndexY8i = _mm256_set1_epi32(y * common.width);
         const __m256 y8 = _mm256_set1_ps((float32)y);
         const Vec3_8 filmOffsetY8 = filmUnitOffsetY8 * y8;
 
-        uint32 n = (maxX - minX) / 8;
-        for (uint32 i = 0; i < n; i++) {
-            const __m256 baseX8 = _mm256_set1_ps((float32)i * 8.0f);
-            const __m256 x8 = _mm256_set_ps(7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f) + minX8 + baseX8;
+        for (uint32 i = 0; i < batchesX; i++) {
+            const uint32 baseX = minX + i * 8;
+            const __m256 baseX8 = _mm256_set1_ps((float32)baseX);
+            const __m256 x8 = baseX8 + _mm256_set_ps(7.0f, 6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f);
 
             const Vec3_8 filmOffsetX8 = filmUnitOffsetX8 * x8;
             const Vec3_8 filmPos8 = filmTopLeft8 + filmOffsetX8 + filmOffsetY8;
             const Vec3_8 rayDir8 = Normalize_8(filmPos8 - cameraPos8);
-            RandomSeries series = { .state = 0 }; // TODO init
-            series.state += common.seed;
 
-            const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, common.minDist, common.maxDist,
-                                                        *common.geometry, &series);
-            const uint32 basePixelIndex = y * common.width + minX + i * 8;
+            const __m256i baseX8i = _mm256_set1_epi32(baseX);
+            const __m256i pixelIndex8 = basePixelIndexY8i + baseX8i + _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+            RandomSeries_8 series8 = {
+                .state = WangHash_8(pixelIndex8),
+            };
+            // series.state += common.seed;
+
+            const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, minDist8, maxDist8, *common.geometry,
+                                                        &series8);
+            const uint32 basePixelIndex = y * common.width + baseX;
             StoreVec3_8(raycastColor8, work->colorHdr + basePixelIndex);
         }
 
@@ -895,7 +1064,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             .cameraPos = cameraPos,
             .width = width,
             .height = height,
-            .minDist = 0.0f,
+            .minDist = 0.0001f,
             .maxDist = 20.0f,
         };
 

@@ -1,16 +1,52 @@
-// SIMD helpers ------------------------------------------------------------------------
-
 const __m256 ZERO_8 = _mm256_setzero_ps();
 const __m256 ONE_8 = _mm256_set1_ps(1.0f);
 
+const __m256i ZERO_8i = _mm256_setzero_si256();
+const __m256i SET_8i = _mm256_set1_epi64x(-1);
+
 bool AllZero_8(__m256 x)
 {
+    // testc returns 1 if (NOT(ZERO_8) AND x) is all zeroes
     return _mm256_testc_ps(ZERO_8, x) == 1;
 }
 
 bool AnyNonZero_8(__m256 x)
 {
     return _mm256_testc_ps(ZERO_8, x) != 1;
+}
+
+bool AllZero_8(__m256i x)
+{
+    return _mm256_testc_si256(ZERO_8i, x) == 1;
+}
+
+bool AnyNonZero_8(__m256i x)
+{
+    return _mm256_testc_si256(ZERO_8i, x) != 1;
+}
+
+bool AllOne_8(__m256i x)
+{
+    // testc returns 1 if (NOT(x) AND SET_8i) is all zeroes
+    return _mm256_testc_si256(x, SET_8i) == 1;
+}
+
+bool AnyZero_8(__m256i x)
+{
+    return _mm256_testc_si256(x, SET_8i) != 1;
+}
+
+inline __m256i operator+(__m256i a, __m256i b)
+{
+    return _mm256_add_epi32(a, b);
+}
+inline __m256i operator-(__m256i a, __m256i b)
+{
+    return _mm256_sub_epi32(a, b);
+}
+inline __m256i operator*(__m256i a, __m256i b)
+{
+    return _mm256_mul_epi32(a, b);
 }
 
 inline __m256 operator+(__m256 a, __m256 b)
@@ -25,21 +61,47 @@ inline __m256 operator*(__m256 a, __m256 b)
 {
     return _mm256_mul_ps(a, b);
 }
+inline __m256 operator/(__m256 a, __m256 b)
+{
+    return _mm256_div_ps(a, b);
+}
 
 inline __m256 operator-(__m256 x)
 {
     return ZERO_8 - x;
 }
 
+__m256 Lerp_8(__m256 a, __m256 b, __m256 t)
+{
+    return a + (b - a) * t;
+}
+
 struct Vec3_8
 {
+    const static Vec3_8 zero;
+    const static Vec3_8 one;
+    const static Vec3_8 unitX;
+    const static Vec3_8 unitY;
+    const static Vec3_8 unitZ;
+
     __m256 x, y, z;
 };
 
+const Vec3_8 Vec3_8::zero = Vec3_8 { ZERO_8, ZERO_8, ZERO_8 };
+const Vec3_8 Vec3_8::one = Vec3_8 { ONE_8, ONE_8, ONE_8 };
+
+const Vec3_8 Vec3_8::unitX = Vec3_8 { ONE_8, ZERO_8, ZERO_8 };
+const Vec3_8 Vec3_8::unitY = Vec3_8 { ZERO_8, ONE_8, ZERO_8 };
+const Vec3_8 Vec3_8::unitZ = Vec3_8 { ZERO_8, ZERO_8, ONE_8 };
+
 struct Quat_8
 {
+    const static Quat_8 one;
+
     __m256 x, y, z, w;
 };
+
+const Quat_8 Quat_8::one = Quat_8 { ZERO_8, ZERO_8, ZERO_8, ONE_8 };
 
 Vec3_8 Set1Vec3_8(Vec3 v)
 {
@@ -98,6 +160,10 @@ inline Vec3_8 operator*(Vec3_8 v, __m256 s)
         .z = v.z * s,
     };
 }
+inline Vec3_8 operator*(__m256 s, Vec3_8 v)
+{
+    return v * s;
+}
 inline Vec3_8 operator/(Vec3_8 v, __m256 s)
 {
     return Vec3_8 {
@@ -118,6 +184,15 @@ Vec3_8 Multiply_8(Vec3_8 v1, Vec3_8 v2)
         .x = v1.x * v2.x,
         .y = v1.y * v2.y,
         .z = v1.z * v2.z,
+    };
+}
+
+Vec3_8 Lerp_8(Vec3_8 v1, Vec3_8 v2, __m256 t)
+{
+    return Vec3_8 {
+        Lerp_8(v1.x, v2.x, t),
+        Lerp_8(v1.y, v2.y, t),
+        Lerp_8(v1.z, v2.z, t),
     };
 }
 
@@ -159,6 +234,15 @@ Vec3_8 Reciprocal_8(Vec3_8 v)
     };
 }
 
+Vec3_8 Blend_8(Vec3_8 v1, Vec3_8 v2, __m256 mask)
+{
+    return Vec3_8 {
+        _mm256_blendv_ps(v1.x, v2.x, mask),
+        _mm256_blendv_ps(v1.y, v2.y, mask),
+        _mm256_blendv_ps(v1.z, v2.z, mask),
+    };
+}
+
 Quat_8 Set1Quat_8(Quat q)
 {
     return Quat_8 {
@@ -172,10 +256,10 @@ Quat_8 Set1Quat_8(Quat q)
 Quat_8 Multiply_8(Quat_8 q1, Quat_8 q2)
 {
     return Quat_8 {
-        .x = q1.w * q2.x - q1.x * q2.w + q1.y * q2.z - q1.z * q2.y,
-        .y = q1.w * q2.y - q1.y * q2.w + q1.z * q2.x - q1.x * q2.z,
-        .z = q1.w * q2.z - q1.z * q2.w + q1.x * q2.y - q1.y * q2.x,
-        .w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z,
+        .x = q1.w*q2.x + q1.x*q2.w + q1.y*q2.z - q1.z*q2.y,
+        .y = q1.w*q2.y + q1.y*q2.w + q1.z*q2.x - q1.x*q2.z,
+        .z = q1.w*q2.z + q1.z*q2.w + q1.x*q2.y - q1.y*q2.x,
+        .w = q1.w*q2.w - q1.x*q2.x - q1.y*q2.y - q1.z*q2.z,
     };
 }
 
@@ -200,6 +284,50 @@ Vec3_8 Multiply_8(Quat_8 q, Vec3_8 v)
     return Vec3_8 { qvqInv.x, qvqInv.y, qvqInv.z };
 }
 
+__m256 MagSq_8(Quat_8 q)
+{
+    return q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+}
+__m256 Mag_8(Quat_8 q)
+{
+    return _mm256_sqrt_ps(MagSq_8(q));
+}
+Quat_8 Normalize_8(Quat_8 q)
+{
+    const __m256 mag = Mag_8(q);
+    return Quat_8 {
+        .x = q.x / mag,
+        .y = q.y / mag,
+        .z = q.z / mag,
+        .w = q.w / mag,
+    };
+}
+
+Quat_8 Blend_8(Quat_8 q1, Quat_8 q2, __m256 mask)
+{
+    return Quat_8 {
+        .x = _mm256_blendv_ps(q1.x, q2.x, mask),
+        .y = _mm256_blendv_ps(q1.y, q2.y, mask),
+        .z = _mm256_blendv_ps(q1.z, q2.z, mask),
+        .w = _mm256_blendv_ps(q1.w, q2.w, mask),
+    };
+}
+
+// Axis should be a unit vector
+Quat_8 QuatFromAngleUnitAxis_8(__m256 angle8, Vec3_8 axis8)
+{
+    const __m256 half8 = _mm256_set1_ps(0.5f);
+    const __m256 cosHalfAngle8 = _mm256_cos_ps(angle8 * half8);
+    const __m256 sinHalfAngle8 = _mm256_sin_ps(angle8 * half8);
+
+    return Quat_8 {
+        .x = axis8.x * sinHalfAngle8,
+        .y = axis8.y * sinHalfAngle8,
+        .z = axis8.z * sinHalfAngle8,
+        .w = cosHalfAngle8,
+    };
+}
+
 __m256 RayPlaneIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, Vec3_8 planeOrigin8, Vec3_8 planeNormal8, __m256* t8)
 {
     const __m256 dotDirNormal8 = Dot_8(rayDir8, planeNormal8);
@@ -207,7 +335,7 @@ __m256 RayPlaneIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, Vec3_8 planeOri
     const __m256 result8 = _mm256_cmp_ps(dotDirNormal8, ZERO_8, _CMP_NEQ_OQ);
 
     const __m256 invDotDirNormal8 = _mm256_rcp_ps(dotDirNormal8);
-    *t8 = _mm256_mul_ps(Dot_8(planeOrigin8 - rayOrigin8, planeNormal8), invDotDirNormal8);
+    *t8 = Dot_8(planeOrigin8 - rayOrigin8, planeNormal8) * invDotDirNormal8;
     return result8;
 }
 
@@ -277,5 +405,3 @@ __m256 RayTriangleIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, Vec3 a, Vec3
     result8 = _mm256_and_ps(result8, _mm256_cmp_ps(*t8, ZERO_8, _CMP_GE_OQ));
     return result8;
 }
-
-// -------------------------------------------------------------------------------------
