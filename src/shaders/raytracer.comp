@@ -60,6 +60,7 @@ layout(binding = 1) uniform UBO
 	vec3 filmTopLeft;
 	uint numMeshes;
 	vec3 filmUnitOffsetX;
+	float frac;
 	vec3 filmUnitOffsetY;
 	Material materials[MAX_MATERIALS];
 	Mesh meshes[MAX_MESHES];
@@ -409,16 +410,25 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 
 void main()
 {
+	const uvec2 canvasSize = imageSize(resultImage);
+	const uint maxPixelX = uint(float(canvasSize.x) * ubo.frac);
 	const uvec2 pixel = gl_GlobalInvocationID.xy;
-	const vec3 filmOffsetX = ubo.filmUnitOffsetX * pixel.x;
-	const vec3 filmOffsetY = ubo.filmUnitOffsetY * pixel.y;
-	const vec3 filmPos = ubo.filmTopLeft + filmOffsetX + filmOffsetY;
-	const vec3 rayDir = normalize(filmPos - ubo.cameraPos);
+	const ivec2 pixelSigned = ivec2(pixel);
 
-	const uint pixelIndex = pixel.y * imageSize(resultImage).x + pixel.x;
-	uint seed = WangHash(pixelIndex);
-	seed += ubo.seed;
-	const vec3 raycastColor = RaycastColor(ubo.cameraPos, rayDir, seed);
+	if (pixel.x > maxPixelX) {
+		imageStore(resultImage, pixelSigned, vec4(0.0, 0.0, 0.0, 0.0));
+	}
+	else {
+		const vec3 filmOffsetX = ubo.filmUnitOffsetX * pixel.x;
+		const vec3 filmOffsetY = ubo.filmUnitOffsetY * pixel.y;
+		const vec3 filmPos = ubo.filmTopLeft + filmOffsetX + filmOffsetY;
+		const vec3 rayDir = normalize(filmPos - ubo.cameraPos);
 
-	imageStore(resultImage, ivec2(gl_GlobalInvocationID.xy), vec4(raycastColor, 1.0));
+		const uint pixelIndex = pixel.y * imageSize(resultImage).x + pixel.x;
+		uint seed = WangHash(pixelIndex);
+		seed += ubo.seed;
+		const vec3 raycastColor = RaycastColor(ubo.cameraPos, rayDir, seed);
+
+		imageStore(resultImage, pixelSigned, vec4(raycastColor, 1.0));
+	}
 }

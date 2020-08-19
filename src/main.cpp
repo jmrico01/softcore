@@ -343,6 +343,14 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         panelDebugInfo.Text(string::empty);
 
+        panelDebugInfo.Text(ToString("GPU Load"));
+        static PanelSliderState sliderStateGpuLoad = {
+            .value = appState->gpuFraction
+        };
+        if (panelDebugInfo.SliderFloat(&sliderStateGpuLoad, 0.0f, 1.0f)) {
+            appState->gpuFraction = sliderStateGpuLoad.value;
+        }
+
         panelDebugInfo.Text(ToString("Field of view"));
         static PanelSliderState sliderStateFov = {
             .value = appState->fovDegrees
@@ -463,6 +471,10 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
         const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
 
+        const uint32 width = WINDOW_START_WIDTH;//screenSize.x;
+        const uint32 height = WINDOW_START_HEIGHT;//screenSize.y;
+        const Vec3 cameraPos = appState->cameraPos;
+
         // GPU
         {
             ZoneScopedN("RaytraceGPUSubmit");
@@ -471,12 +483,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
             ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
             computeUbo->seed = rand();
+            computeUbo->frac = appState->gpuFraction;
 
             {
-                const uint32 width = WINDOW_START_WIDTH;//screenSize.x;
-                const uint32 height = WINDOW_START_HEIGHT;//screenSize.y;
-                const Vec3 cameraPos = appState->cameraPos;
-
                 // TODO copy-pasted from raytracer.cpp for now
                 const Quat inverseCameraRot = Inverse(cameraRot);
                 const Vec3 cameraUp2 = inverseCameraRot * Vec3::unitZ;
@@ -489,7 +498,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
                 computeUbo->cameraPos = cameraPos;
                 computeUbo->filmTopLeft = cameraPos + cameraForward2 * filmDist
-                    + (filmWidth / 2.0f + -0.136f) * cameraUp2 + (filmHeight / 2.0f + 0.136f) * cameraLeft2;
+                    + (filmWidth / 2.0f) * cameraLeft2 + (filmHeight / 2.0f) * cameraUp2;
                 computeUbo->filmUnitOffsetX = -cameraLeft2 * filmWidth / (float32)(width - 1);
                 computeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
             }
@@ -559,8 +568,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             vkMapMemory(vulkanState.window.device, raytracePipeline.imageCpuMemory, 0, numBytes, 0, &imageMemory);
             uint32* pixels = (uint32*)imageMemory;
 
-            RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
-                           screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
+            RaytraceRender(cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
+                           width, height, 1.0f - appState->gpuFraction, &appState->canvas, pixels, &allocator, queue);
 
             vkUnmapMemory(vulkanState.window.device, raytracePipeline.imageCpuMemory);
         }

@@ -74,6 +74,7 @@ struct ComputeUbo
 	alignas(16) Vec3 filmTopLeft;
     uint32 numMeshes;
 	alignas(16) Vec3 filmUnitOffsetX;
+    float32 frac;
 	alignas(16) Vec3 filmUnitOffsetY;
 	alignas(16) ComputeMaterial materials[MAX_MATERIALS];
     alignas(16) ComputeMesh meshes[MAX_MESHES];
@@ -130,5 +131,5 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline);
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
+                    uint32 width, uint32 height, float32 frac, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue);

@@ -750,7 +750,7 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 }
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    uint32 width, uint32 height, CanvasState* canvas, uint32* pixels,
+                    uint32 width, uint32 height, float32 frac, CanvasState* canvas, uint32* pixels,
                     LinearAllocator* allocator, AppWorkQueue* queue)
 {
     ZoneScoped;
@@ -792,9 +792,12 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             .maxDist = 20.0f,
         };
 
+        const uint32 widthFrac = (uint32)((float32)width * frac);
+        const uint32 pixelStartX = width - widthFrac;
+
         const uint32 WORK_TILE_SIZE = 16;
         static_assert(WORK_TILE_SIZE % 8 == 0); // AVX width
-        const uint32 wholeTilesX = width / WORK_TILE_SIZE;
+        const uint32 wholeTilesX = widthFrac / WORK_TILE_SIZE + 1;
         const uint32 wholeTilesY = height / WORK_TILE_SIZE;
         const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
         Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);
@@ -805,8 +808,8 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
                 RaycastThreadWork* work = &workEntries[workIndex];
                 work->common = &workCommon;
                 work->colorHdr = canvas->colorHdr.data,
-                work->minX = tileX * WORK_TILE_SIZE;
-                work->maxX = (tileX + 1) * WORK_TILE_SIZE;
+                work->minX = tileX * WORK_TILE_SIZE + pixelStartX;
+                work->maxX = (tileX + 1) * WORK_TILE_SIZE + pixelStartX;
                 work->minY = tileY * WORK_TILE_SIZE;
                 work->maxY = (tileY + 1) * WORK_TILE_SIZE;
 

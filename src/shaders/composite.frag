@@ -31,7 +31,9 @@ void main()
 
 	//vec3 colorBlended = colorRaytraced;
 	//vec3 colorBlended = colorRasterized;
-	vec3 colorBlended = colorRaytraced.rgb * colorRaytraced.a + colorRasterized.rgb * colorRasterized.a;
+	float gpuWeight = colorRasterized.a;
+	float cpuWeight = 1.0 - gpuWeight;
+	vec3 colorBlended = colorRaytraced.rgb * cpuWeight + colorRasterized.rgb * gpuWeight;
 	//vec3 colorBlended = mix(colorRaytraced, colorRasterized.rgb, colorRasterized.a);
 
     outColor = vec4(colorBlended, 1.0);
