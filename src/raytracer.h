@@ -103,7 +103,9 @@ struct VulkanRaytracePipeline
     VkQueue queue;
     VkCommandPool commandPool;
 
-    VulkanImage image;
+    VkImage imageCpu;
+    VkDeviceMemory imageCpuMemory;
+    VulkanImage imageGpu;
 
     uint32 numTriangles;
     VulkanBuffer triangles;

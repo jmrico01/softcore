@@ -33,120 +33,6 @@ struct ComputeTriangle
 };
 static_assert(sizeof(ComputeTriangle) % 16 == 0); // std140 layout
 
-// Reference http://www.burtleburtle.net/bob/hash/integer.html
-uint32 WangHash(uint32 seed)
-{
-    seed = (seed ^ 61) ^ (seed >> 16);
-    seed *= 9;
-    seed = seed ^ (seed >> 4);
-    seed *= 0x27d4eb2d;
-    seed = seed ^ (seed >> 15);
-    return seed;
-}
-
-struct RandomSeries
-{
-    uint32 state;
-};
-
-// Reference https://en.wikipedia.org/wiki/Xorshift
-uint32 XOrShift32(RandomSeries* series)
-{
-    uint32 x = series->state;
-	x ^= x << 13;
-	x ^= x >> 17;
-	x ^= x << 5;
-
-    series->state = x;
-	return x;
-}
-
-uint32 RandomUInt32(RandomSeries* series)
-{
-    return XOrShift32(series);
-}
-
-int RandomInt32(RandomSeries* series, uint32 max)
-{
-    return (int)(RandomUInt32(series) % max);
-}
-
-float32 RandomUnilateral(RandomSeries* series)
-{
-    return (float32)RandomUInt32(series) / (float32)UINT32_MAX_VALUE;
-}
-
-float32 RandomBilateral(RandomSeries* series)
-{
-    return 2.0f * RandomUnilateral(series) - 1.0f;
-}
-
-Vec3 RandomInUnitSphereSurface(RandomSeries* series)
-{
-	const float32 angle = RandomUnilateral(series) * 2.0f * PI_F;
-	const float32 z = RandomBilateral(series);
-	const float32 r = Sqrt32(1.0f - z * z);
-	return Vec3 { r * Cos32(angle), r * Sin32(angle), z };
-}
-
-float32 pow3(float32 x)
-{
-	return x * x * x;
-}
-
-float32 pow4(float32 x)
-{
-	return x * x * x * x;
-}
-
-Vec3 Reflect(Vec3 dir, Vec3 normal)
-{
-    return dir - 2.0f * Dot(dir, normal) * normal;
-}
-
-// Returns a quaternion for the rotation required to align unit X vector with unit vector reference
-Quat QuatRotationFromUnitX(Vec3 reference)
-{
-    const float32 EPSILON = 0.000001f;
-
-	const float dotUnitX = Dot(Vec3::unitX, reference);
-	if (dotUnitX > (1.0 - EPSILON)) {
-		return Quat::one;
-	}
-	else if (dotUnitX < (-1.0 + EPSILON)) {
-		// 180-degree rotation about y axis (perpendicular to x)
-		// comptime angle = PI, cosHalfAngle = 0, sinHalfAngle = 1, axis = 0.0, 1.0, 0.0
-		return Quat { 0.0, 1.0, 0.0, 0.0 };
-	}
-
-	const Vec3 axis = Cross(Vec3::unitX, reference);
-    const Quat q = { .x = axis.x, .y = axis.y, .z = axis.z, .w = 1.0f + dotUnitX };
-	return Normalize(q);
-}
-
-Vec3 GetNewRayDirDiffuse(Vec3 hitNormal, RandomSeries* series)
-{
-	return Normalize(hitNormal + RandomInUnitSphereSurface(series));
-}
-
-Vec3 GetNewRayDirSpecular(Vec3 rayDir, Vec3 hitNormal, float32 smoothness, RandomSeries* series)
-{
-	// Gamma is a random variable between 0 and pi/2, that is picked from a distribution which is
-	// lerp between uniform and gaussian w/ fancy params, based on parameter smoothness
-	const float32 oneMinusS = 1.0f - smoothness;
-	const float32 c = 1.0f / (pow3(oneMinusS)) - 1.0f;
-	const float32 x = RandomUnilateral(series);
-	const float32 gamma = Lerp(1.0f - x, Exp32(-c * x * x), smoothness) * PI_F / 2.0f;
-	const float32 phi = RandomUnilateral(series) * 2.0f * PI_F;
-	const Vec3 pureBounce = Reflect(rayDir, hitNormal);
-
-    Quat quat = QuatFromAngleUnitAxis(gamma, Vec3::unitZ);
-	quat = QuatFromAngleUnitAxis(phi, Vec3::unitX) * quat;
-    // TODO hardcode unitX here?
-	quat = QuatRotationFromUnitX(pureBounce) * quat;
-
-	return quat * Vec3::unitX;
-}
 
 bool GetMaterial(const_string name, RaycastMaterial* material)
 {
@@ -457,150 +343,6 @@ bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
     return true;
 }
 
-void TraverseMeshes(Vec3 rayOrigin, Vec3 rayDir, const RaycastGeometry& geometry, float32 minDist,
-                    uint32* hitMaterialIndex, Vec3* hitNormal, float32* hitDist)
-{
-	for (uint32 m = 0; m < geometry.meshes.size; m++) {
-		const RaycastMesh mesh = geometry.meshes[m];
-		const Vec3 meshRayOrigin = mesh.inverseQuat * (rayOrigin + mesh.offset);
-		const Vec3 meshRayDir = mesh.inverseQuat * rayDir;
-		const Vec3 meshInverseRayDir = Reciprocal(meshRayDir);
-
-		uint32 i = mesh.startBvh;
-		while (i < mesh.endBvh) {
-			const RaycastBvh bvh = geometry.bvhs[i];
-
-			float32 tMin, tMax;
-			const bool aabbHit = RayAABBIntersection(meshRayOrigin, meshInverseRayDir, bvh.aabb, &tMin, &tMax);
-			if (aabbHit && !(tMin < 0.0 && tMax < 0.0) && tMin < *hitDist) {
-				const uint32 tStart = bvh.startTriangle;
-				const uint32 tEnd = bvh.endTriangle;
-				for (uint32 j = tStart; j < tEnd; j++) {
-                    const RaycastTriangle& triangle = geometry.triangles[j];
-					const float32 dotNegRayNormal = Dot(meshRayDir, triangle.normal);
-					if (dotNegRayNormal <= 0.0) {
-						float32 t;
-						const bool triangleHit = RayTriangleIntersection(meshRayOrigin, meshRayDir,
-                                                                         triangle.pos[0],
-                                                                         triangle.pos[1],
-                                                                         triangle.pos[2],
-                                                                         &t);
-						if (triangleHit && t > minDist && t < *hitDist) {
-							*hitMaterialIndex = triangle.materialIndex;
-							*hitNormal = triangle.normal;
-							*hitDist = t;
-						}
-					}
-				}
-
-				i++;
-			}
-			else {
-				i += bvh.skip;
-			}
-		}
-	}
-}
-
-Vec3 RaycastColor(Vec3 rayOrigin, Vec3 rayDir, float32 minDist, float32 maxDist, const RaycastGeometry& geometry,
-                  RandomSeries* series)
-{
-    UNREFERENCED_PARAMETER(series);
-    ZoneScoped;
-
-    const uint32 MAX_MATERIALS = geometry.materials.size;
-
-	const float32 weightDiffuse = 0.5f;
-	const float32 weightSpecular = 1.0f - weightDiffuse;
-	const float32 smoothnessDiffuse = 0.2f;
-
-    uint32 hitMaterialIndex = MAX_MATERIALS;
-    Vec3 hitNormal;
-	float hitDist = maxDist;
-	TraverseMeshes(rayOrigin, rayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
-
-    const RaycastMaterial* hitMaterial;
-	if (hitMaterialIndex == MAX_MATERIALS) {
-        return Vec3::zero;
-	}
-	else {
-        hitMaterial = &geometry.materials[hitMaterialIndex];
-		if (hitMaterial->emission > 0.0) {
-			return hitMaterial->emission * hitMaterial->emissionColor;
-		}
-	}
-
-	rayOrigin += rayDir * hitDist;
-	Vec3 albedoMultDiffuse = hitMaterial->albedo;
-	Vec3 albedoMultSpecular = hitMaterial->albedo;
-	const float32 sampleWeightDiffuse = 1.0f / SAMPLES_DIFFUSE * weightDiffuse;
-	const float32 sampleWeightSpecular = 1.0f / SAMPLES_SPECULAR * weightSpecular;
-	const Vec3 sampleRayDirDiffuse = GetNewRayDirDiffuse(hitNormal, series);
-	const Vec3 sampleRayDirSpecular = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterial->smoothness, series);
-
-	Vec3 color = Vec3::zero;
-
-	// Diffuse
-	for (uint32 s = 0; s < SAMPLES_DIFFUSE; s++) {
-		Vec3 sampleRayOrigin = rayOrigin;
-		Vec3 sampleRayDir = sampleRayDirDiffuse;
-
-		for (uint32 i = 0; i < BOUNCES_DIFFUSE; i++) {
-			hitMaterialIndex = MAX_MATERIALS;
-			hitDist = maxDist;
-			TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
-
-			if (hitMaterialIndex == MAX_MATERIALS) {
-				break;
-			}
-			else {
-				const RaycastMaterial& hitMaterialD = geometry.materials[hitMaterialIndex];
-				if (hitMaterialD.emission > 0.0) {
-					color += hitMaterialD.emission * sampleWeightDiffuse
-                        * Multiply(hitMaterialD.emissionColor, albedoMultDiffuse);
-                    break;
-				}
-				else if (i != BOUNCES_DIFFUSE - 1) {
-					albedoMultDiffuse = Multiply(albedoMultDiffuse, hitMaterialD.albedo);
-					sampleRayOrigin += sampleRayDir * hitDist;
-					sampleRayDir = GetNewRayDirDiffuse(hitNormal, series);
-				}
-			}
-		}
-	}
-
-	// Specular
-	for (uint32 s = 0; s < SAMPLES_SPECULAR; s++) {
-		Vec3 sampleRayOrigin = rayOrigin;
-		Vec3 sampleRayDir = sampleRayDirSpecular;
-
-		for (uint32 i = 0; i < BOUNCES_SPECULAR; i++) {
-			hitMaterialIndex = MAX_MATERIALS;
-			hitDist = maxDist;
-			TraverseMeshes(sampleRayOrigin, sampleRayDir, geometry, minDist, &hitMaterialIndex, &hitNormal, &hitDist);
-
-			if (hitMaterialIndex == MAX_MATERIALS) {
-				break;
-			}
-			else {
-				const RaycastMaterial& hitMaterialS = geometry.materials[hitMaterialIndex];
-				if (hitMaterialS.emission > 0.0) {
-					color += hitMaterialS.emission * sampleWeightSpecular
-                        * Multiply(hitMaterialS.emissionColor, albedoMultSpecular);
-					break;
-				}
-				else if (i != BOUNCES_SPECULAR - 1) {
-					albedoMultSpecular = Multiply(albedoMultSpecular, hitMaterialS.albedo);
-					sampleRayOrigin += sampleRayDir * hitDist;
-					sampleRayDir = GetNewRayDirSpecular(rayDir, hitNormal, hitMaterialS.smoothness, series);
-				}
-			}
-		}
-	}
-
-	return color;
-}
-
 #include "simd.cpp"
 
 // Reference http://www.burtleburtle.net/bob/hash/integer.html
@@ -664,9 +406,9 @@ __m256 pow4_8(__m256 x)
 	return x * x * x * x;
 }
 
-Vec3_8 Reflect_8(Vec3_8 dir, Vec3_8 normal)
+Vec3_8 Reflect_8(Vec3_8 dir8, Vec3_8 normal8)
 {
-    return dir - _mm256_set1_ps(2.0f) * Dot_8(dir, normal) * normal;
+    return dir8 - _mm256_set1_ps(2.0f) * Dot_8(dir8, normal8) * normal8;
 }
 
 // Returns a quaternion for the rotation required to align unit X vector with unit vector reference
@@ -682,7 +424,9 @@ Quat_8 QuatRotationFromUnitX_8(Vec3_8 reference8)
     const __m256 sameDir8 = _mm256_cmp_ps(dotUnitX8, ONE_8 - EPSILON_8, _CMP_GT_OQ);
     q8 = Blend_8(q8, Quat_8::one, sameDir8);
 
-    const __m256 oppositeDir8 = _mm256_cmp_ps(dotUnitX8, -ONE_8 + EPSILON_8, _CMP_LT_OQ);
+    const __m256 oppositeDir8 = _mm256_cmp_ps(dotUnitX8, EPSILON_8 - ONE_8, _CMP_LT_OQ);
+    // 180-degree rotation about y axis (perpendicular to x)
+    // comptime angle = PI, cosHalfAngle = 0, sinHalfAngle = 1, axis = 0.0, 1.0, 0.0
     q8 = Blend_8(q8, Quat_8 { ZERO_8, ONE_8, ZERO_8, ZERO_8 }, oppositeDir8);
 
 	return q8;
@@ -977,7 +721,6 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     const Vec3_8 cameraPos8 = Set1Vec3_8(common.cameraPos);
 
     for (uint32 y = minY; y < maxY; y++) {
-#if 1
         const __m256i basePixelIndexY8i = _mm256_set1_epi32(y * common.width);
         const __m256 y8 = _mm256_set1_ps((float32)y);
         const Vec3_8 filmOffsetY8 = filmUnitOffsetY8 * y8;
@@ -996,32 +739,13 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
             RandomSeries_8 series8 = {
                 .state = WangHash_8(pixelIndex8),
             };
-            // series.state += common.seed;
+            series8.state = series8.state + _mm256_set1_epi32(common.seed);
 
             const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, minDist8, maxDist8, *common.geometry,
                                                         &series8);
             const uint32 basePixelIndex = y * common.width + baseX;
             StoreVec3_8(raycastColor8, work->colorHdr + basePixelIndex);
         }
-
-#else
-        const Vec3 filmOffsetY = common.filmUnitOffsetY * (float32)y;
-
-        for (uint32 x = minX; x < maxX; x++) {
-            const uint32 pixelIndex = y * common.width + x;
-
-            const Vec3 filmOffsetX = common.filmUnitOffsetX * (float32)x;
-            const Vec3 filmPos = common.filmTopLeft + filmOffsetX + filmOffsetY;
-            const Vec3 rayDir = Normalize(filmPos - common.cameraPos);
-            RandomSeries series = { .state = WangHash(pixelIndex) };
-            series.state += common.seed;
-
-            const Vec3 raycastColor = RaycastColor(common.cameraPos, rayDir, common.minDist, common.maxDist,
-                                                   *common.geometry, &series);
-
-            work->colorHdr[pixelIndex] = raycastColor;
-        }
-#endif
     }
 }
 
@@ -1263,7 +987,22 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
         }
     }
 
-    // image
+    // image (CPU)
+    {
+        const VkFormat format = VK_FORMAT_R8G8B8A8_UINT;
+        if (!CreateImage(window.device, window.physicalDevice, width, height, format,
+                         VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         &pipeline->imageCpu, &pipeline->imageCpuMemory)) {
+            LOG_ERROR("CreateImage failed\n");
+            return false;
+        }
+
+        SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
+        TransitionImageLayout(commandBuffer, pipeline->imageCpu,
+                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    }
+
+    // image (GPU)
     {
         const VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT;
         VkFormatProperties formatProperties;
@@ -1277,19 +1016,19 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
                          VK_IMAGE_TILING_OPTIMAL,
                          VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         &pipeline->image.image, &pipeline->image.memory)) {
+                         &pipeline->imageGpu.image, &pipeline->imageGpu.memory)) {
             LOG_ERROR("CreateImage failed\n");
             return false;
         }
 
-        if (!CreateImageView(window.device, pipeline->image.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
-                             &pipeline->image.view)) {
+        if (!CreateImageView(window.device, pipeline->imageGpu.image, format, VK_IMAGE_ASPECT_COLOR_BIT,
+                             &pipeline->imageGpu.view)) {
             LOG_ERROR("CreateImageView failed\n");
             return false;
         }
 
         SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, commandPool, window.graphicsQueue);
-        TransitionImageLayout(commandBuffer, pipeline->image.image,
+        TransitionImageLayout(commandBuffer, pipeline->imageGpu.image,
                               VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     }
 
@@ -1375,7 +1114,7 @@ bool LoadRaytracePipeline(const VulkanWindow& window, VkCommandPool commandPool,
 
         const VkDescriptorImageInfo imageInfo = {
             .sampler = VK_NULL_HANDLE,
-            .imageView = pipeline->image.view,
+            .imageView = pipeline->imageGpu.view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL
         };
         descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1537,7 +1276,9 @@ void UnloadRaytracePipeline(VkDevice device, VulkanRaytracePipeline* pipeline)
     vkDestroyDescriptorPool(device, pipeline->descriptorPool, nullptr);
     vkDestroyDescriptorSetLayout(device, pipeline->descriptorSetLayout, nullptr);
 
-    DestroyVulkanImage(device, &pipeline->image);
+    DestroyVulkanImage(device, &pipeline->imageGpu);
+    vkDestroyImage(device, pipeline->imageCpu, nullptr);
+    vkFreeMemory(device, pipeline->imageCpuMemory, nullptr);
     DestroyVulkanBuffer(device, &pipeline->uniform);
 
     DestroyVulkanBuffer(device, &pipeline->bvhs);

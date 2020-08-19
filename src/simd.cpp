@@ -166,10 +166,11 @@ inline Vec3_8 operator*(__m256 s, Vec3_8 v)
 }
 inline Vec3_8 operator/(Vec3_8 v, __m256 s)
 {
+    const __m256 reciprocalS = _mm256_rcp_ps(s);
     return Vec3_8 {
-        .x = v.x * s,
-        .y = v.y * s,
-        .z = v.z * s,
+        .x = v.x * reciprocalS,
+        .y = v.y * reciprocalS,
+        .z = v.z * reciprocalS,
     };
 }
 
@@ -219,9 +220,9 @@ __m256 Dot_8(Vec3_8 v1, Vec3_8 v2)
 Vec3_8 Cross_8(Vec3_8 v1, Vec3_8 v2)
 {
     return Vec3_8 {
-        .x = v1.y * v2.z - v1.z * v2.y,
-        .y = v1.z * v2.x - v1.x * v2.z,
-        .z = v1.x * v2.y - v1.y * v2.x,
+        v1.y * v2.z - v1.z * v2.y,
+        v1.z * v2.x - v1.x * v2.z,
+        v1.x * v2.y - v1.y * v2.x,
     };
 }
 
@@ -266,9 +267,9 @@ Quat_8 Multiply_8(Quat_8 q1, Quat_8 q2)
 Quat_8 Inverse_8(Quat_8 q)
 {
     return Quat_8 {
-        .x = ZERO_8 - q.x,
-        .y = ZERO_8 - q.y,
-        .z = ZERO_8 - q.z,
+        .x = -q.x,
+        .y = -q.y,
+        .z = -q.z,
         .w = q.w
     };
 }
@@ -326,17 +327,6 @@ Quat_8 QuatFromAngleUnitAxis_8(__m256 angle8, Vec3_8 axis8)
         .z = axis8.z * sinHalfAngle8,
         .w = cosHalfAngle8,
     };
-}
-
-__m256 RayPlaneIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, Vec3_8 planeOrigin8, Vec3_8 planeNormal8, __m256* t8)
-{
-    const __m256 dotDirNormal8 = Dot_8(rayDir8, planeNormal8);
-    // Set mask when dot is non-zero (otherwise, ray direction is perpendicular to plane normal, so no intersection)
-    const __m256 result8 = _mm256_cmp_ps(dotDirNormal8, ZERO_8, _CMP_NEQ_OQ);
-
-    const __m256 invDotDirNormal8 = _mm256_rcp_ps(dotDirNormal8);
-    *t8 = Dot_8(planeOrigin8 - rayOrigin8, planeNormal8) * invDotDirNormal8;
-    return result8;
 }
 
 __m256 RayAABBIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDirInv8, Box aabb, __m256* tMinOut, __m256* tMaxOut)
@@ -400,8 +390,5 @@ __m256 RayTriangleIntersection_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, Vec3 a, Vec3
     result8 = _mm256_and_ps(result8, _mm256_cmp_ps(u8 + v8, ONE_8, _CMP_LE_OQ));
 
     *t8 = f8 * Dot_8(ac8, q8);
-    // Result mask is set when t8 >= 0.0f (otherwise, intersection point is behind the ray origin)
-    // NOTE if t is 0, intersection is a line (I think)
-    result8 = _mm256_and_ps(result8, _mm256_cmp_ps(*t8, ZERO_8, _CMP_GE_OQ));
     return result8;
 }

@@ -138,7 +138,7 @@ internal bool LoadScene(const_string scene, AppState* appState, LinearAllocator*
     }
 
     // const VkImageView rasterizedImageView = meshPipeline->colorImage.view;
-    const VkImageView rasterizedImageView = raytracePipeline->image.view;
+    const VkImageView rasterizedImageView = raytracePipeline->imageGpu.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, allocator, compositePipeline)) {
         LOG_ERROR("Failed to reload window-dependent Vulkan mesh pipeline\n");
         return false;
@@ -193,6 +193,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                 DEBUG_PANIC("Failed to load start scene\n");
             }
         }
+
+        appState->gpuFraction = 0.5f;
 
         // Debug views 
         appState->debugView = false;
@@ -398,6 +400,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     const float32 farZ = 100.0f;
     const Mat4 proj = Perspective(fovRadians, aspect, nearZ, farZ);
 
+#if 0
     {
         ZoneScopedN("PreRasterize");
 
@@ -438,20 +441,33 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
     }
+#endif
 
     // Raytraced render
     {
         ZoneScopedN("RaytraceRender");
 
-#if 0
+        // TEST UPDATE GEOMETRY, this belongs in game logic before rendering
+        {
+            const Vec3 tetrahedronPos = Vec3 {
+                Sin32(appState->elapsedTime),
+                0.1f * Sin32(appState->elapsedTime / 23.0f),
+                0.0f
+            };
+            const Quat tetrahedronRotInv = Inverse(QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ));
+
+            RaycastGeometry& geometry = appState->raycastGeometry;
+            geometry.meshes[6].offset = -tetrahedronPos;
+            geometry.meshes[6].inverseQuat = tetrahedronRotInv;
+        }
+
+        const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
+
         // GPU
         {
-            ZoneScopedN("RaytraceGPU");
+            ZoneScopedN("RaytraceGPUSubmit");
 
             LinearAllocator allocator(transientState->scratch);
-
-            const VulkanRaytracePipeline& raytracePipeline = appState->vulkanAppState.raytracePipeline;
-            const RaycastGeometry& geometry = appState->raycastGeometry;
 
             ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
             computeUbo->seed = rand();
@@ -478,6 +494,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                 computeUbo->filmUnitOffsetY = -cameraUp2 * filmHeight / (float32)(height - 1);
             }
 
+            const RaycastGeometry& geometry = appState->raycastGeometry;
+
             uint32 numMaterials = 0;
             for (uint32 i = 0; i < geometry.materials.size; i++) {
                 const RaycastMaterial& srcMaterial = geometry.materials[i];
@@ -494,20 +512,21 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
                 }
             }
 
-            const uint32 numMeshes = raytracePipeline.meshes.size;
-            computeUbo->numMeshes = numMeshes;
-            MemCopy(computeUbo->meshes, raytracePipeline.meshes.data, numMeshes * sizeof(ComputeMesh));
+            computeUbo->numMeshes = geometry.meshes.size;
+            for (uint32 i = 0; i < geometry.meshes.size; i++) {
+                const RaycastMesh& srcMesh = geometry.meshes[i];
+                ComputeMesh* dstMesh = &computeUbo->meshes[i];
 
-            const Vec3 tetrahedronPos = Vec3 {
-                Sin32(appState->elapsedTime),
-                0.1f * Sin32(appState->elapsedTime / 23.0f),
-                0.0f
-            };
-            const Quat tetrahedronRotInv = Inverse(QuatFromAngleUnitAxis(ModFloat32(appState->elapsedTime, 2.0 * PI_F), Vec3::unitZ));
-            computeUbo->meshes[6].offset = -tetrahedronPos;
-            computeUbo->meshes[6].inverseQuat = Vec4 {
-                tetrahedronRotInv.x, tetrahedronRotInv.y, tetrahedronRotInv.z, tetrahedronRotInv.w
-            };
+                dstMesh->inverseQuat = Vec4 {
+                    .x = srcMesh.inverseQuat.x,
+                    .y = srcMesh.inverseQuat.y,
+                    .z = srcMesh.inverseQuat.z,
+                    .w = srcMesh.inverseQuat.w
+                };
+                dstMesh->offset = srcMesh.offset;
+                dstMesh->startBvh = srcMesh.startBvh;
+                dstMesh->endBvh = srcMesh.endBvh;
+            }
 
             void* data;
             vkMapMemory(vulkanState.window.device, raytracePipeline.uniform.memory, 0, sizeof(ComputeUbo), 0, &data);
@@ -527,15 +546,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             if (vkQueueSubmit(raytracePipeline.queue, 1, &submitInfo, raytracePipeline.fence) != VK_SUCCESS) {
                 LOG_ERROR("vkQueueSubmit failed\n");
             }
-
-            if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-                LOG_ERROR("vkWaitForFences failed\n");
-            }
-            if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.fence) != VK_SUCCESS) {
-                LOG_ERROR("vkResetFences failed\n");
-            }
         }
-#else
 
         // CPU
         {
@@ -545,15 +556,26 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
             const uint32 numBytes = screenSize.x * screenSize.y * 4;
             void* imageMemory;
-            vkMapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory, 0, numBytes, 0, &imageMemory);
+            vkMapMemory(vulkanState.window.device, raytracePipeline.imageCpuMemory, 0, numBytes, 0, &imageMemory);
             uint32* pixels = (uint32*)imageMemory;
 
             RaytraceRender(appState->cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
                            screenSize.x, screenSize.y, &appState->canvas, pixels, &allocator, queue);
 
-            vkUnmapMemory(vulkanState.window.device, appState->vulkanAppState.imageMemory);
+            vkUnmapMemory(vulkanState.window.device, raytracePipeline.imageCpuMemory);
         }
-#endif
+
+        // Wait for GPU render
+        {
+            ZoneScopedN("RaytraceGPUWait");
+
+            if (vkWaitForFences(vulkanState.window.device, 1, &raytracePipeline.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                LOG_ERROR("vkWaitForFences failed\n");
+            }
+            if (vkResetFences(vulkanState.window.device, 1, &raytracePipeline.fence) != VK_SUCCESS) {
+                LOG_ERROR("vkResetFences failed\n");
+            }
+        }
     }
 
     // Vulkan rendering
@@ -605,13 +627,13 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     imageCopy.extent.height = screenSize.y;
     imageCopy.extent.depth = 1;
 
-    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.image.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.imageGpu.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     vkCmdCopyImage(buffer,
-                   appState->vulkanAppState.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   appState->vulkanAppState.raytracePipeline.imageCpu, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    appState->vulkanAppState.compositePipeline.raytracedImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &imageCopy);
     TransitionImageLayout(buffer, appState->vulkanAppState.compositePipeline.raytracedImage.image,
@@ -666,7 +688,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     vkCmdEndRenderPass(buffer);
 
     // TODO uhhhh
-    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.image.image,
+    TransitionImageLayout(buffer, appState->vulkanAppState.raytracePipeline.imageGpu.image,
                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
     if (vkEndCommandBuffer(buffer) != VK_SUCCESS) {
@@ -706,27 +728,13 @@ APP_LOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppLoadVulkanSwapchainState)
     TransientState* transientState = GetTransientState(memory);
     LinearAllocator allocator(transientState->scratch);
 
-    // Create images
-    {
-        if (!CreateImage(window.device, window.physicalDevice, swapchain.extent.width, swapchain.extent.height,
-                         VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_TILING_LINEAR, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         &app->image, &app->imageMemory)) {
-            LOG_ERROR("CreateImage failed\n");
-            return false;
-        }
-
-        SCOPED_VK_COMMAND_BUFFER(commandBuffer, window.device, app->commandPool, window.graphicsQueue);
-        TransitionImageLayout(commandBuffer, app->image,
-                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    }
-
     if (!LoadMeshPipelineSwapchain(window, swapchain, app->commandPool, &allocator, &app->meshPipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan mesh pipeline\n");
         return false;
     }
 
     // const VkImageView rasterizedImageView = app->meshPipeline.colorImage.view;
-    const VkImageView rasterizedImageView = app->raytracePipeline.image.view;
+    const VkImageView rasterizedImageView = app->raytracePipeline.imageGpu.view;
     if (!LoadCompositePipelineSwapchain(window, swapchain, rasterizedImageView, &allocator, &app->compositePipeline)) {
         LOG_ERROR("Failed to load swapchain-dependent Vulkan composite pipeline\n");
         return false;
@@ -756,9 +764,6 @@ APP_UNLOAD_VULKAN_SWAPCHAIN_STATE_FUNCTION(AppUnloadVulkanSwapchainState)
     UnloadSpritePipelineSwapchain(device, &app->spritePipeline);
     UnloadCompositePipelineSwapchain(device, &app->compositePipeline);
     UnloadMeshPipelineSwapchain(device, &app->meshPipeline);
-
-    vkDestroyImage(device, app->image, nullptr);
-    vkFreeMemory(device, app->imageMemory, nullptr);
 }
 
 APP_LOAD_VULKAN_WINDOW_STATE_FUNCTION(AppLoadVulkanWindowState)

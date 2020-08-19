@@ -40,9 +40,6 @@ struct VulkanAppState
     VkCommandBuffer commandBuffer;
     VkFence fence;
 
-    VkImage image;
-    VkDeviceMemory imageMemory;
-
     VulkanRaytracePipeline raytracePipeline;
     VulkanMeshPipeline meshPipeline;
     VulkanCompositePipeline compositePipeline;
@@ -67,6 +64,8 @@ struct AppState
 
     CanvasState canvas;
     RaycastGeometry raycastGeometry;
+
+    float32 gpuFraction;
 
     // Debug
     bool debugView;
