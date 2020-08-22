@@ -13,6 +13,7 @@
 #include <km_common/app/km_app.h>
 
 #define ENABLE_THREADS 1
+#define TIME_BOMB 0
 
 // Required for platform main
 const char* WINDOW_NAME = "softcore";
@@ -21,6 +22,8 @@ const int WINDOW_START_HEIGHT = 768;
 const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
 const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(4);
+
+const float32 START_GPU_FRACTION = 0.75f;
 
 struct StartSceneInfo
 {
@@ -194,7 +197,7 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
 
-        appState->gpuFraction = 0.5f;
+        appState->gpuFraction = START_GPU_FRACTION;
 
         // Debug views 
         appState->debugView = false;
@@ -212,6 +215,13 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     }
 
     appState->elapsedTime += deltaTime;
+#if TIME_BOMB
+    if (appState->elapsedTime > 8.0f) {
+        // kaboom
+        int* i = 0;
+        *i = 0;
+    }
+#endif
 
     if (KeyPressed(input, KM_KEY_G)) {
         appState->debugView = !appState->debugView;

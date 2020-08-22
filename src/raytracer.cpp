@@ -345,57 +345,6 @@ bool CreateRaycastGeometry(const LoadObjResult& obj, uint32 bvhMaxTriangles,
 
 #include "simd.cpp"
 
-// Reference http://www.burtleburtle.net/bob/hash/integer.html
-__m256i WangHash_8(__m256i seed8)
-{
-    const __m256i c61i = _mm256_set1_epi32(61);
-    const __m256i c9i = _mm256_set1_epi32(9);
-    const __m256i cBigBoyi = _mm256_set1_epi32(0x27d4eb2d);
-
-    seed8 = _mm256_xor_si256(_mm256_xor_si256(seed8, c61i), _mm256_srli_epi32(seed8, 16));
-    seed8 = seed8 * c9i;
-    seed8 = _mm256_xor_si256(seed8, _mm256_srli_epi32(seed8, 4));
-    seed8 = seed8 * cBigBoyi;
-    seed8 = _mm256_xor_si256(seed8, _mm256_srli_epi32(seed8, 15));
-    return seed8;
-}
-
-struct RandomSeries_8
-{
-    __m256i state;
-};
-
-// Reference https://en.wikipedia.org/wiki/Xorshift
-__m256i XOrShift32_8(RandomSeries_8* series8)
-{
-    __m256i x = series8->state;
-    x = _mm256_xor_si256(x, _mm256_slli_epi32(x, 13));
-    x = _mm256_xor_si256(x, _mm256_srli_epi32(x, 17));
-    x = _mm256_xor_si256(x, _mm256_slli_epi32(x, 5));
-    series8->state = x;
-	return x;
-}
-
-__m256 RandomUnilateral_8(RandomSeries_8* series8)
-{
-    const __m256 int32MinValue8 = _mm256_set1_ps((float32)INT32_MIN_VALUE);
-    const __m256 uint32MaxValue8 = _mm256_set1_ps((float32)UINT32_MAX_VALUE);
-    return  (_mm256_cvtepi32_ps(XOrShift32_8(series8)) - int32MinValue8) / uint32MaxValue8;
-}
-
-__m256 RandomBilateral_8(RandomSeries_8* series8)
-{
-    return _mm256_set1_ps(2.0f) * RandomUnilateral_8(series8) - ONE_8;
-}
-
-Vec3_8 RandomInUnitSphereSurface_8(RandomSeries_8* series8)
-{
-	const __m256 angle8 = _mm256_set1_ps(2.0f * PI_F) * RandomUnilateral_8(series8);
-	const __m256 z8 = RandomBilateral_8(series8);
-	const __m256 r8 = _mm256_sqrt_ps(ONE_8 - z8 * z8);
-	return Vec3_8 { r8 * _mm256_cos_ps(angle8), r8 * _mm256_sin_ps(angle8), z8 };
-}
-
 __m256 pow3_8(__m256 x)
 {
 	return x * x * x;
@@ -409,6 +358,63 @@ __m256 pow4_8(__m256 x)
 Vec3_8 Reflect_8(Vec3_8 dir8, Vec3_8 normal8)
 {
     return dir8 - _mm256_set1_ps(2.0f) * Dot_8(dir8, normal8) * normal8;
+}
+
+// Reference http://www.burtleburtle.net/bob/hash/integer.html
+__m128i WangHash_4(__m128i seed4)
+{
+    const __m128i c61i = _mm_set1_epi32(61);
+    const __m128i c9i = _mm_set1_epi32(9);
+    const __m128i cBigBoyi = _mm_set1_epi32(0x27d4eb2d);
+
+    seed4 = _mm_xor_si128(_mm_xor_si128(seed4, c61i), _mm_srli_epi32(seed4, 16));
+    seed4 = seed4 * c9i;
+    seed4 = _mm_xor_si128(seed4, _mm_srli_epi32(seed4, 4));
+    seed4 = seed4 * cBigBoyi;
+    seed4 = _mm_xor_si128(seed4, _mm_srli_epi32(seed4, 15));
+    return seed4;
+}
+
+struct RandomSeries_8
+{
+    __m128i stateA;
+    __m128i stateB;
+};
+
+// Reference https://en.wikipedia.org/wiki/Xorshift
+__m128i XOrShift32_4(__m128i state)
+{
+    state = _mm_xor_si128(state, _mm_slli_epi32(state, 13));
+    state = _mm_xor_si128(state, _mm_srli_epi32(state, 17));
+    state = _mm_xor_si128(state, _mm_slli_epi32(state, 5));
+	return state;
+}
+
+__m256i RandomUInt32_8(RandomSeries_8* series8)
+{
+    series8->stateA = XOrShift32_4(series8->stateA);
+    series8->stateB = XOrShift32_4(series8->stateB);
+    return _mm256_set_m128i(series8->stateB, series8->stateA);
+}
+
+__m256 RandomUnilateral_8(RandomSeries_8* series8)
+{
+    const __m256 int32MinValue8 = _mm256_set1_ps((float32)INT32_MIN_VALUE);
+    const __m256 uint32MaxValue8 = _mm256_set1_ps((float32)UINT32_MAX_VALUE);
+    return  (_mm256_cvtepi32_ps(RandomUInt32_8(series8)) - int32MinValue8) / uint32MaxValue8;
+}
+
+__m256 RandomBilateral_8(RandomSeries_8* series8)
+{
+    return _mm256_set1_ps(2.0f) * RandomUnilateral_8(series8) - ONE_8;
+}
+
+Vec3_8 RandomInUnitSphereSurface_8(RandomSeries_8* series8)
+{
+	const __m256 angle8 = _mm256_set1_ps(2.0f * PI_F) * RandomUnilateral_8(series8);
+	const __m256 z8 = RandomBilateral_8(series8);
+	const __m256 r8 = _mm256_sqrt_ps(ONE_8 - z8 * z8);
+	return Vec3_8 { r8 * _mm256_cos_ps(angle8), r8 * _mm256_sin_ps(angle8), z8 };
 }
 
 // Returns a quaternion for the rotation required to align unit X vector with unit vector reference
@@ -456,10 +462,10 @@ Vec3_8 GetNewRayDirSpecular_8(Vec3_8 rayDir8, Vec3_8 hitNormal8, __m256 smoothne
 }
 
 void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& geometry, __m256 minDist8,
-                      __m256i* hitMaterialIndex8, Vec3_8* hitNormal8, __m256* hitDist8)
+                      __m256i* hitMaterialIndex8i, Vec3_8* hitNormal8, __m256* hitDist8)
 {
 	for (uint32 m = 0; m < geometry.meshes.size; m++) {
-		const RaycastMesh mesh = geometry.meshes[m];
+        const RaycastMesh mesh = geometry.meshes[m];
         const Vec3_8 meshOffset8 = Set1Vec3_8(mesh.offset);
         const Quat_8 meshInverseQuat8 = Set1Quat_8(mesh.inverseQuat);
 
@@ -496,11 +502,10 @@ void TraverseMeshes_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, const RaycastGeometry& 
                         const __m256 triangleCloser8 = _mm256_and_ps(_mm256_cmp_ps(t8, minDist8, _CMP_GT_OQ),
                                                                      _mm256_cmp_ps(t8, *hitDist8, _CMP_LT_OQ));
                         const __m256 triangleHitCloser8 = _mm256_and_ps(triangleHit8, triangleCloser8);
-                        const __m256i triangleHitCloser8i = _mm256_castps_si256(triangleHitCloser8);
 
                         const __m256i materialIndex8 = _mm256_set1_epi32(triangle.materialIndex);
                         const Vec3_8 normal8 = Set1Vec3_8(triangle.normal);
-                        *hitMaterialIndex8 = _mm256_blendv_epi8(*hitMaterialIndex8, materialIndex8, triangleHitCloser8i);
+                        *hitMaterialIndex8i = BlendvEpi32NoAvx2_8(*hitMaterialIndex8i, materialIndex8, triangleHitCloser8);
                         hitNormal8->x = _mm256_blendv_ps(hitNormal8->x, normal8.x, triangleHitCloser8);
                         hitNormal8->y = _mm256_blendv_ps(hitNormal8->y, normal8.y, triangleHitCloser8);
                         hitNormal8->z = _mm256_blendv_ps(hitNormal8->z, normal8.z, triangleHitCloser8);
@@ -582,7 +587,7 @@ Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256
     __m256 hitDist8 = maxDist8;
     TraverseMeshes_8(rayOrigin8, rayDir8, geometry, minDist8, &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-    const __m256i notHit8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+    const __m256i notHit8i = CompareEqualsEpi32NoAvx2_8(hitMaterialIndex8, maxMaterials8);
     if (AllOne_8(notHit8i)) {
         return Vec3_8::zero;
     }
@@ -624,16 +629,16 @@ Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256
             TraverseMeshes_8(sampleRayOrigin8, sampleRayDir8, geometry, minDist8,
                              &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-            const __m256i notHitDiffuse8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+            const __m256i notHitDiffuse8i = CompareEqualsEpi32NoAvx2_8(hitMaterialIndex8, maxMaterials8);
             if (AllOne_8(notHitDiffuse8i)) {
                 break;
             }
 
-            hitMaterialIndex8 = _mm256_blendv_epi8(hitMaterialIndex8, ZERO_8i, notHitDiffuse8i);
+            const __m256 notHitDiffuse8 = _mm256_castsi256_ps(notHitDiffuse8i);
+            hitMaterialIndex8 = BlendvEpi32NoAvx2_8(hitMaterialIndex8, ZERO_8i, notHitDiffuse8);
             LoadMaterialProperties_8(hitMaterialIndex8, geometry.materials,
                                      &hitMaterialAlbedo8, &hitMaterialSmoothness8,
                                      &hitMaterialEmissionColor8, &hitMaterialEmission8);
-            const __m256 notHitDiffuse8 = _mm256_castsi256_ps(notHitDiffuse8i);
             const __m256 notLightDiffuse8 = _mm256_or_ps(notHitDiffuse8,
                                                          _mm256_cmp_ps(hitMaterialEmission8, ZERO_8, _CMP_LE_OQ));
 
@@ -655,16 +660,16 @@ Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256
             TraverseMeshes_8(sampleRayOrigin8, sampleRayDir8, geometry, minDist8,
                              &hitMaterialIndex8, &hitNormal8, &hitDist8);
 
-            const __m256i notHitSpecular8i = _mm256_cmpeq_epi32(hitMaterialIndex8, maxMaterials8);
+            const __m256i notHitSpecular8i = CompareEqualsEpi32NoAvx2_8(hitMaterialIndex8, maxMaterials8);
             if (AllOne_8(notHitSpecular8i)) {
                 break;
             }
 
-            hitMaterialIndex8 = _mm256_blendv_epi8(hitMaterialIndex8, ZERO_8i, notHitSpecular8i);
+            const __m256 notHitSpecular8 = _mm256_castsi256_ps(notHitSpecular8i);
+            hitMaterialIndex8 = BlendvEpi32NoAvx2_8(hitMaterialIndex8, ZERO_8i, notHitSpecular8);
             LoadMaterialProperties_8(hitMaterialIndex8, geometry.materials,
                                      &hitMaterialAlbedo8, &hitMaterialSmoothness8,
                                      &hitMaterialEmissionColor8, &hitMaterialEmission8);
-            const __m256 notHitSpecular8 = _mm256_castsi256_ps(notHitSpecular8i);
             const __m256 notLightSpecular8 = _mm256_or_ps(notHitSpecular8,
                                                           _mm256_cmp_ps(hitMaterialEmission8, ZERO_8, _CMP_LE_OQ));
 
@@ -721,7 +726,7 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     const Vec3_8 cameraPos8 = Set1Vec3_8(common.cameraPos);
 
     for (uint32 y = minY; y < maxY; y++) {
-        const __m256i basePixelIndexY8i = _mm256_set1_epi32(y * common.width);
+        const __m128i basePixelIndexY4i = _mm_set1_epi32(y * common.width);
         const __m256 y8 = _mm256_set1_ps((float32)y);
         const Vec3_8 filmOffsetY8 = filmUnitOffsetY8 * y8;
 
@@ -734,12 +739,15 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
             const Vec3_8 filmPos8 = filmTopLeft8 + filmOffsetX8 + filmOffsetY8;
             const Vec3_8 rayDir8 = Normalize_8(filmPos8 - cameraPos8);
 
-            const __m256i baseX8i = _mm256_set1_epi32(baseX);
-            const __m256i pixelIndex8 = basePixelIndexY8i + baseX8i + _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+            const __m128i baseX4i = _mm_set1_epi32(baseX);
+            const __m128i pixelIndex4a = basePixelIndexY4i + baseX4i + _mm_set_epi32(3, 2, 1, 0);
+            const __m128i pixelIndex4b = basePixelIndexY4i + baseX4i + _mm_set_epi32(7, 6, 5, 4);
             RandomSeries_8 series8 = {
-                .state = WangHash_8(pixelIndex8),
+                .stateA = WangHash_4(pixelIndex4a),
+                .stateB = WangHash_4(pixelIndex4b),
             };
-            series8.state = series8.state + _mm256_set1_epi32(common.seed);
+            series8.stateA = series8.stateA + _mm_set1_epi32(common.seed);
+            series8.stateB = series8.stateB + _mm_set1_epi32(common.seed);
 
             const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, minDist8, maxDist8, *common.geometry,
                                                         &series8);
@@ -779,7 +787,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         const Vec3 filmUnitOffsetX = -cameraLeft * filmWidth / (float32)(width - 1);
         const Vec3 filmUnitOffsetY = -cameraUp * filmHeight / (float32)(height - 1);
 
-        RaycastThreadWorkCommon workCommon = {
+        const RaycastThreadWorkCommon workCommon = {
             .geometry = &geometry,
             .seed = (uint32)rand(),
             .filmTopLeft = filmTopLeft,
@@ -797,7 +805,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
 
         const uint32 WORK_TILE_SIZE = 16;
         static_assert(WORK_TILE_SIZE % 8 == 0); // AVX width
-        const uint32 wholeTilesX = widthFrac / WORK_TILE_SIZE + 1;
+        const uint32 wholeTilesX = (widthFrac + WORK_TILE_SIZE - 1) / WORK_TILE_SIZE;
         const uint32 wholeTilesY = height / WORK_TILE_SIZE;
         const uint32 numWorkEntries = wholeTilesX * wholeTilesY;
         Array<RaycastThreadWork> workEntries = allocator->NewArray<RaycastThreadWork>(numWorkEntries);

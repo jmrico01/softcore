@@ -36,17 +36,17 @@ bool AnyZero_8(__m256i x)
     return _mm256_testc_si256(x, SET_8i) != 1;
 }
 
-inline __m256i operator+(__m256i a, __m256i b)
+inline __m128i operator+(__m128i a, __m128i b)
 {
-    return _mm256_add_epi32(a, b);
+    return _mm_add_epi32(a, b);
 }
-inline __m256i operator-(__m256i a, __m256i b)
+inline __m128i operator-(__m128i a, __m128i b)
 {
-    return _mm256_sub_epi32(a, b);
+    return _mm_sub_epi32(a, b);
 }
-inline __m256i operator*(__m256i a, __m256i b)
+inline __m128i operator*(__m128i a, __m128i b)
 {
-    return _mm256_mul_epi32(a, b);
+    return _mm_mul_epi32(a, b);
 }
 
 inline __m256 operator+(__m256 a, __m256 b)
@@ -69,6 +69,24 @@ inline __m256 operator/(__m256 a, __m256 b)
 inline __m256 operator-(__m256 x)
 {
     return ZERO_8 - x;
+}
+
+__m256i CompareEqualsEpi32NoAvx2_8(__m256i a, __m256i b)
+{
+    const __m128i aLo = _mm256_extractf128_si256(a, 0);
+    const __m128i aHi = _mm256_extractf128_si256(a, 1);
+    const __m128i bLo = _mm256_extractf128_si256(b, 0);
+    const __m128i bHi = _mm256_extractf128_si256(b, 1);
+
+    return _mm256_set_m128i(_mm_cmpeq_epi32(aHi, bHi), _mm_cmpeq_epi32(aLo, bLo));
+}
+
+__m256i BlendvEpi32NoAvx2_8(__m256i a, __m256i b, __m256 mask)
+{
+    const __m256 aPs = _mm256_castsi256_ps(a);
+    const __m256 bPs = _mm256_castsi256_ps(b);
+    const __m256 resultPs = _mm256_blendv_ps(aPs, bPs, mask);
+    return _mm256_castps_si256(resultPs);
 }
 
 __m256 Lerp_8(__m256 a, __m256 b, __m256 t)
