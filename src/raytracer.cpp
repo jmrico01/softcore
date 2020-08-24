@@ -567,7 +567,7 @@ void LoadMaterialProperties_8(const __m256i index8, const Array<RaycastMaterial>
     *emission8 = _mm256_load_ps(emissions);
 }
 
-Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256 maxDist8,
+Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256 maxDist8, __m256 weightDiffuse8,
                       const RaycastGeometry& geometry, RandomSeries_8* series8)
 {
     ZoneScoped;
@@ -578,7 +578,6 @@ Vec3_8 RaycastColor_8(Vec3_8 rayOrigin8, Vec3_8 rayDir8, __m256 minDist8, __m256
     const __m256 samplesSpecular8 = _mm256_set1_ps((float32)SAMPLES_SPECULAR);
     const __m256i maxMaterials8 = _mm256_set1_epi32(geometry.materials.size);
 
-    const __m256 weightDiffuse8 = _mm256_set1_ps(0.5f);
     const __m256 weightSpecular8 = ONE_8 - weightDiffuse8;
     const __m256 smoothnessDiffuse = _mm256_set1_ps(0.2f);
 
@@ -687,6 +686,8 @@ struct RaycastThreadWorkCommon
 {
     const RaycastGeometry* geometry;
     uint32 seed;
+    float32 weightDiffuse;
+    float32 noiseFraction;
     Vec3 filmTopLeft;
     Vec3 filmUnitOffsetX;
     Vec3 filmUnitOffsetY;
@@ -717,6 +718,9 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
     const uint32 maxY = work->maxY;
     const uint32 batchesX = (maxX - minX) / 8;
 
+    const __m128i seed4 = _mm_set1_epi32(common.seed);
+    const __m256 weightDiffuse8 = _mm256_set1_ps(common.weightDiffuse);
+    const __m256 noiseFraction8 = _mm256_set1_ps(common.noiseFraction);
     const __m256 minDist8 = _mm256_set1_ps(common.minDist);
     const __m256 maxDist8 = _mm256_set1_ps(common.maxDist);
     const __m256 minX8 = _mm256_set1_ps((float32)minX);
@@ -740,17 +744,20 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
             const Vec3_8 rayDir8 = Normalize_8(filmPos8 - cameraPos8);
 
             const __m128i baseX4i = _mm_set1_epi32(baseX);
-            const __m128i pixelIndex4a = basePixelIndexY4i + baseX4i + _mm_set_epi32(3, 2, 1, 0);
-            const __m128i pixelIndex4b = basePixelIndexY4i + baseX4i + _mm_set_epi32(7, 6, 5, 4);
-            RandomSeries_8 series8 = {
-                .stateA = WangHash_4(pixelIndex4a),
-                .stateB = WangHash_4(pixelIndex4b),
+            const __m128i hash4A = WangHash_4(basePixelIndexY4i + baseX4i + _mm_set_epi32(3, 2, 1, 0));
+            const __m128i hash4B = WangHash_4(basePixelIndexY4i + baseX4i + _mm_set_epi32(7, 6, 5, 4));
+            RandomSeries_8 seededSeries8 = {
+                .stateA = hash4A + seed4,
+                .stateB = hash4B + seed4,
             };
-            series8.stateA = series8.stateA + _mm_set1_epi32(common.seed);
-            series8.stateB = series8.stateB + _mm_set1_epi32(common.seed);
+            const __m256 noiseMask8 = _mm256_cmp_ps(RandomUnilateral_8(&seededSeries8), noiseFraction8, _CMP_LE_OQ);
+            const __m128i noiseMask4iLo = _mm_castps_si128(_mm256_extractf128_ps(noiseMask8, 0));
+            const __m128i noiseMask4iHi = _mm_castps_si128(_mm256_extractf128_ps(noiseMask8, 1));
+            seededSeries8.stateA = _mm_blendv_epi8(hash4A, seededSeries8.stateA, noiseMask4iLo);
+            seededSeries8.stateB = _mm_blendv_epi8(hash4B, seededSeries8.stateB, noiseMask4iHi);
 
-            const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, minDist8, maxDist8, *common.geometry,
-                                                        &series8);
+            const Vec3_8 raycastColor8 = RaycastColor_8(cameraPos8, rayDir8, minDist8, maxDist8, weightDiffuse8,
+                                                        *common.geometry, &seededSeries8);
             const uint32 basePixelIndex = y * common.width + baseX;
             StoreVec3_8(raycastColor8, work->colorHdr + basePixelIndex);
         }
@@ -758,8 +765,8 @@ APP_WORK_QUEUE_CALLBACK_FUNCTION(RaycastThreadProc)
 }
 
 void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGeometry& geometry,
-                    uint32 width, uint32 height, float32 frac, CanvasState* canvas, uint32* pixels,
-                    LinearAllocator* allocator, AppWorkQueue* queue)
+                    uint32 width, uint32 height, float32 fillFraction, float32 noiseFraction, float32 weightDiffuse,
+                    CanvasState* canvas, uint32* pixels, LinearAllocator* allocator, AppWorkQueue* queue)
 {
     ZoneScoped;
     const uint32 numPixels = width * height;
@@ -790,6 +797,8 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
         const RaycastThreadWorkCommon workCommon = {
             .geometry = &geometry,
             .seed = (uint32)rand(),
+            .weightDiffuse = weightDiffuse,
+            .noiseFraction = noiseFraction,
             .filmTopLeft = filmTopLeft,
             .filmUnitOffsetX = filmUnitOffsetX,
             .filmUnitOffsetY = filmUnitOffsetY,
@@ -800,7 +809,7 @@ void RaytraceRender(Vec3 cameraPos, Quat cameraRot, float32 fov, const RaycastGe
             .maxDist = 20.0f,
         };
 
-        const uint32 widthFrac = (uint32)((float32)width * frac);
+        const uint32 widthFrac = (uint32)((float32)width * fillFraction);
         const uint32 pixelStartX = width - widthFrac;
 
         const uint32 WORK_TILE_SIZE = 16;

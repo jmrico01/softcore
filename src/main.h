@@ -66,6 +66,8 @@ struct AppState
     RaycastGeometry raycastGeometry;
 
     float32 gpuFraction;
+    float32 noiseFraction;
+    float32 weightDiffuse;
 
     // Debug
     bool debugView;

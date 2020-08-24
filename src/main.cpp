@@ -23,7 +23,7 @@ const bool WINDOW_LOCK_CURSOR = true;
 const uint64 PERMANENT_MEMORY_SIZE = MEGABYTES(256);
 const uint64 TRANSIENT_MEMORY_SIZE = GIGABYTES(4);
 
-const float32 START_GPU_FRACTION = 0.75f;
+const float32 START_GPU_FRACTION = 0.95f;
 
 struct StartSceneInfo
 {
@@ -181,10 +181,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         appState->cameraAngles = START_SCENE_INFO.angles;
         appState->fovDegrees = 60.0f;
 
-        appState->canvas.test1 = 0.0f;
-        appState->canvas.test2 = 0.0f;
-        appState->canvas.test3 = 0.0f;
-
         MemSet(appState->canvas.colorHdr.data, 0, CanvasState::MAX_PIXELS * sizeof(Vec3));
         MemSet(appState->canvas.decay.data, 0, CanvasState::MAX_PIXELS * sizeof(uint8));
 
@@ -198,6 +194,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
         }
 
         appState->gpuFraction = START_GPU_FRACTION;
+        appState->noiseFraction = 1.0f;
+        appState->weightDiffuse = 0.5f;
 
         // Debug views 
         appState->debugView = false;
@@ -361,6 +359,22 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             appState->gpuFraction = sliderStateGpuLoad.value;
         }
 
+        panelDebugInfo.Text(ToString("Noise"));
+        static PanelSliderState sliderStateNoise = {
+            .value = appState->noiseFraction
+        };
+        if (panelDebugInfo.SliderFloat(&sliderStateNoise, 0.0f, 1.0f)) {
+            appState->noiseFraction = sliderStateNoise.value;
+        }
+
+        panelDebugInfo.Text(ToString("Diffuse/Specular"));
+        static PanelSliderState sliderStateWeightDiffuse = {
+            .value = appState->weightDiffuse
+        };
+        if (panelDebugInfo.SliderFloat(&sliderStateWeightDiffuse, 0.0f, 1.0f)) {
+            appState->weightDiffuse = sliderStateWeightDiffuse.value;
+        }
+
         panelDebugInfo.Text(ToString("Field of view"));
         static PanelSliderState sliderStateFov = {
             .value = appState->fovDegrees
@@ -418,7 +432,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
     const float32 farZ = 100.0f;
     const Mat4 proj = Perspective(fovRadians, aspect, nearZ, farZ);
 
-#if 0
     {
         ZoneScopedN("PreRasterize");
 
@@ -459,7 +472,6 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             }
         }
     }
-#endif
 
     // Raytraced render
     {
@@ -493,7 +505,9 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
 
             ComputeUbo* computeUbo = allocator.New<ComputeUbo>();
             computeUbo->seed = rand();
-            computeUbo->frac = appState->gpuFraction;
+            computeUbo->fillFraction = appState->gpuFraction;
+            computeUbo->noiseFraction = appState->noiseFraction;
+            computeUbo->weightDiffuse = appState->weightDiffuse;
 
             {
                 // TODO copy-pasted from raytracer.cpp for now
@@ -579,7 +593,8 @@ APP_UPDATE_AND_RENDER_FUNCTION(AppUpdateAndRender)
             uint32* pixels = (uint32*)imageMemory;
 
             RaytraceRender(cameraPos, cameraRot, fovRadians, appState->raycastGeometry,
-                           width, height, 1.0f - appState->gpuFraction, &appState->canvas, pixels, &allocator, queue);
+                           width, height, 1.0f - appState->gpuFraction, appState->noiseFraction, appState->weightDiffuse,
+                           &appState->canvas, pixels, &allocator, queue);
 
             vkUnmapMemory(vulkanState.window.device, raytracePipeline.imageCpuMemory);
         }

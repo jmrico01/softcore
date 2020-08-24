@@ -60,10 +60,12 @@ layout(binding = 1) uniform UBO
 	vec3 filmTopLeft;
 	uint numMeshes;
 	vec3 filmUnitOffsetX;
-	float frac;
+	float fillFraction;
 	vec3 filmUnitOffsetY;
+	float noiseFraction;
 	Material materials[MAX_MATERIALS];
 	Mesh meshes[MAX_MESHES];
+	float weightDiffuse;
 } ubo;
 layout(std140, binding = 2) readonly buffer Triangles
 {
@@ -319,7 +321,7 @@ void TraverseMeshes(vec3 rayOrigin, vec3 rayDir, inout uint hitMaterialIndex, ou
 
 vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 {
-	const float weightDiffuse = 0.5;
+	const float weightDiffuse = ubo.weightDiffuse;
 	const float weightSpecular = 1.0 - weightDiffuse;
 	const float smoothnessDiffuse = 0.2;
 
@@ -411,7 +413,7 @@ vec3 RaycastColor(vec3 rayOrigin, vec3 rayDir, uint randomState)
 void main()
 {
 	const uvec2 canvasSize = imageSize(resultImage);
-	const uint maxPixelX = uint(float(canvasSize.x) * ubo.frac);
+	const uint maxPixelX = uint(float(canvasSize.x) * ubo.fillFraction);
 	const uvec2 pixel = gl_GlobalInvocationID.xy;
 	const ivec2 pixelSigned = ivec2(pixel);
 
@@ -424,9 +426,11 @@ void main()
 		const vec3 filmPos = ubo.filmTopLeft + filmOffsetX + filmOffsetY;
 		const vec3 rayDir = normalize(filmPos - ubo.cameraPos);
 
-		const uint pixelIndex = pixel.y * imageSize(resultImage).x + pixel.x;
-		uint seed = WangHash(pixelIndex);
-		seed += ubo.seed;
+		const uint hash = WangHash(pixel.y * imageSize(resultImage).x + pixel.x);
+		uint seed = hash + ubo.seed;
+		if (RandomUnilateral(seed) > ubo.noiseFraction) {
+			seed = hash;
+		}
 		const vec3 raycastColor = RaycastColor(ubo.cameraPos, rayDir, seed);
 
 		imageStore(resultImage, pixelSigned, vec4(raycastColor, 1.0));
